@@ -64,27 +64,27 @@ const CHAOS_PER_GULL = 10;  // chaos points needed to earn one new gull
 const DIFF = {
   easy: {
     startGulls:8, npcCount:9, secs:90,
-    dogRate:0.0004, dogR:85,
+    dogRate:0.0004, dogR:92,
     carRate:220,   carSpd:[4.5,7],
     sharkMax:1, heliSpd:1.8, policeRate:700,
     timeBonus:20, scoreMult:0.5,
-    desc:'90s · +20s bonuses · ×0.5 score',
+    desc:'Fewer hazards · +20s bonuses · ×0.5 score',
   },
   normal: {
     startGulls:8, npcCount:10, secs:90,
-    dogRate:0.0018, dogR:100,
+    dogRate:0.0018, dogR:92,
     carRate:180,   carSpd:[5,8.5],
     sharkMax:2, heliSpd:2.2, policeRate:500,
     timeBonus:15, scoreMult:1.0,
-    desc:'90s · +15s bonuses · ×1.0 score',
+    desc:'Standard · +15s bonuses · ×1.0 score',
   },
   hard: {
     startGulls:8, npcCount:10, secs:90,
-    dogRate:0.0055, dogR:118,
+    dogRate:0.0055, dogR:92,
     carRate:130,   carSpd:[6,11],
     sharkMax:3, heliSpd:3.0, policeRate:300,
     timeBonus:10, scoreMult:2.5,
-    desc:'90s · +10s bonuses · ×2.5 score',
+    desc:'Max hazards · +10s bonuses · ×2.5 score',
   },
 };
 
@@ -112,6 +112,7 @@ let cars=[], police=[], pickups=[];
 let boats=[], sharks=[];                 // stage 4 harbor entities
 let helicopter=null; let helicopterSpawned=false;
 let score=0, growthMeter=0;
+let statGullsKilled=0;  // gulls killed by cars/sharks/helicopter
 let scoreMultiplier=1, multiplierTimer=0;    // golden lure bonus
 let goldFlash=0;                             // full-screen flash when lure collected
 let chipCharges=CHIP_MAX, chipTimer=CHIP_RECHARGE;
@@ -151,11 +152,11 @@ const ACH = [
   { id:'last_squawk',  icon:'💀', name:'Murder Most Fowl',         desc:'Lose every last gull before time runs out.'              },
   { id:'heli_killer',  icon:'🚁', name:'Black Squawk Down',        desc:'Bring down the helicopter.'                              },
   { id:'mega_flock',   icon:'🦅', name:'Hitchcock Would Be Proud', desc:'Reach 500 gulls in a single run.'                       },
-  { id:'boat_sinker',  icon:'⚓', name:'The Birdmuda Triangle',    desc:'Sink 10 boats across all runs.'                         },
-  { id:'road_rage',    icon:'🚗', name:'No Tern Signal',           desc:'Cause 20 car crashes by herding people into traffic.'   },
-  { id:'deflock',      icon:'🚔', name:'Until Proven Gullty',      desc:'Overwhelm 20 police officers in a single run.'          },
+  { id:'boat_sinker',  icon:'⚓', name:'The Birdmuda Triangle',    desc:'Sink 5 boats in a single run.'                          },
+  { id:'road_rage',    icon:'🚗', name:'No Tern Signal',           desc:'Cause 10 car crashes by herding people into traffic.'   },
+  { id:'deflock',      icon:'🚔', name:'Until Proven Gullty',      desc:'Overwhelm 15 police officers in a single run.'          },
   { id:'legend',       icon:'🌟', name:'A Fowl Legacy',            desc:'Reach a final score of 50,000.'                         },
-  { id:'news_van',     icon:'📺', name:"You're On The Air",        desc:'Activate the news van 5 times in a single run.'         },
+  { id:'news_van',     icon:'📺', name:"You're On The Air",        desc:'Activate the news van 3 times in a single run.'         },
 ];
 let unlockedAch = new Set();
 try { JSON.parse(localStorage.getItem('squawk_ach')||'[]').forEach(id=>unlockedAch.add(id)); } catch(e){}
@@ -274,9 +275,50 @@ let stageUnlockBanner=0;
 const STAGE2_FLOCK = 25;
 const STAGE3_FLOCK = 75;
 const STAGE4_FLOCK = 150;
-const HELICOPTER_FLOCK = 300;  // triggers the helicopter boss
+const HELICOPTER_FLOCK = 300;
 const H_STAGE3     = 950;
 const H_STAGE4     = 1150;
+
+// ── WORLD DAMAGE ──────────────────────────────────────────
+let worldDamage = {
+  umbrellaDown: [],   // UMBRELLA indices knocked sideways (stage 2)
+  crackPositions: [], // [{x,y,r,ang}] glass cracks on storefronts (stage 3)
+  tireTracks: [],     // [{x1,y1,x2,y2}] skid marks on road (stage 3)
+  fireShops: [],      // shop indices on fire (stage 4)
+  scorchMarks: [],    // [{x,y}] from crashed cars
+};
+function initWorldDamage(){
+  worldDamage={umbrellaDown:[],crackPositions:[],tireTracks:[],fireShops:[],scorchMarks:[]};
+}
+function triggerStage2Damage(){
+  const idxs=[...Array(UMBRELLAS.length).keys()];
+  const n=2+Math.floor(Math.random());
+  for(let i=0;i<n;i++){
+    const ri=Math.floor(Math.random()*idxs.length);
+    worldDamage.umbrellaDown.push(idxs.splice(ri,1)[0]);
+  }
+}
+function triggerStage3Damage(){
+  // Cracked windows on first 2 storefronts
+  const shopCX=[130,420,690];
+  for(let i=0;i<2;i++){
+    worldDamage.crackPositions.push(
+      {x:shopCX[i]+rnd(-20,20), y:H_STAGE2-68+rnd(-8,8), r:rnd(13,20), ang:rnd(0,Math.PI)}
+    );
+  }
+}
+function triggerStage4Damage(){
+  worldDamage.fireShops=[0,1,2];
+  // Tire tracks appear when harbor opens — city was already getting wrecked
+  for(let i=0;i<3;i++){
+    const ly=H_STAGE2+32+Math.floor(rnd(0,2))*58+rnd(-5,5);
+    worldDamage.tireTracks.push({x1:rnd(0,W*0.4),y1:ly+rnd(-3,3),x2:rnd(W*0.6,W),y2:ly+rnd(-3,3)});
+  }
+}
+function addScorchMark(x,y){
+  if(worldDamage.scorchMarks.length<20)
+    worldDamage.scorchMarks.push({x,y});
+}
 
 // ── GULL ───────────────────────────────────────────────────
 // Each gull is either RESTING (sitting on sand) or AIRBORNE (flying).
@@ -1091,11 +1133,6 @@ class Car {
     // Crashed wreck — smoke, then despawn
     if (this.crashed) {
       this.wreckLife--;
-      if (Math.random()<0.02) {
-        const p=new Particle(this.x+rnd(-12,12),this.y+rnd(-10,4),1);
-        p.text='~'; p.col='#636e72'; p.sz=rnd(9,14); p.vx=rnd(-0.4,0.4); p.vy=-0.8; p.dec=0.012;
-        particles.push(p);
-      }
       if (this.wreckLife<=0) this.alive=false;
       return;
     }
@@ -1114,7 +1151,8 @@ class Car {
         scorePopup(this.x, this.y-20, crashGain, '#e74c3c');
         playCarCrash();
         runCarCrashes++;
-        if(runCarCrashes>=20) unlockAch('road_rage');
+        if(runCarCrashes>=10) unlockAch('road_rage');
+        addScorchMark(this.x, this.y);
         for(let j=0;j<10;j++){
           const p=new Particle(this.x+rnd(-22,22),this.y+rnd(-14,14),3);
           p.text=['💥','🔥','!!!','💢'][Math.floor(rnd(0,4))];
@@ -1124,12 +1162,14 @@ class Car {
       }
     }
 
-    // Kill gulls in path
+    // Kill gulls in path — y-gate skips gulls not near road, cap at 5/frame
     let kills=0;
-    for (let i=gulls.length-1; i>=0 && kills<8; i--) {
+    for (let i=gulls.length-1; i>=0 && kills<5; i--) {
       const g=gulls[i];
+      if (g.y < H_STAGE2-10 || g.y > H_STAGE3+10) continue; // not in road zone, skip
       if (Math.abs(g.x-this.x)<this.w*0.65 && Math.abs(g.y-this.y)<this.h*0.85) {
         gulls.splice(i,1); kills++;
+        statGullsKilled++;
       }
     }
     if (kills>0 && Math.random()<0.75) {
@@ -1245,7 +1285,7 @@ class Police {
       score+=policeGain; growthMeter+=20;
       scorePopup(this.x, this.y, policeGain, '#fd79a8');
       runPoliceOverwhelmed++;
-      if(runPoliceOverwhelmed>=20) unlockAch('deflock');
+      if(runPoliceOverwhelmed>=15) unlockAch('deflock');
     }
   }
   draw() {
@@ -1315,11 +1355,11 @@ class NewsVan {
       scorePopup(this.x, this.y-30, vanGain, '#ffd700');
       playNewsJingle();
       runNewsVans++;
-      if(runNewsVans>=5) unlockAch('news_van');
-      for(let i=0;i<14;i++){
-        const p=new Particle(this.x+rnd(-28,28),this.y+rnd(-18,18),3);
-        p.text=['📺','⭐','🌟','LIVE!','ON AIR'][Math.floor(rnd(0,5))];
-        p.col='#ffd700'; p.sz=rnd(12,20); p.dec=0.006; particles.push(p);
+      if(runNewsVans>=3) unlockAch('news_van');
+      for(let i=0;i<5;i++){
+        const p=new Particle(this.x+rnd(-20,20),this.y+rnd(-14,14),2);
+        p.text=['📺','⭐','LIVE!'][Math.floor(rnd(0,3))];
+        p.col='#ffd700'; p.sz=rnd(12,18); p.dec=0.008; particles.push(p);
       }
     }
   }
@@ -1401,12 +1441,7 @@ class Boat {
         scorePopup(this.x, this.y-30, gained, '#74b9ff');
         playBoatSink(); playChipEarned();
         runBoatsSunk++;
-        // Birdmuda Triangle: 10 boats total across all runs (stored in localStorage)
-        let totalBoats=0;
-        try{totalBoats=parseInt(localStorage.getItem('squawk_boats')||'0')||0;}catch(e){}
-        totalBoats++;
-        try{localStorage.setItem('squawk_boats',totalBoats);}catch(e){}
-        if(totalBoats>=10) unlockAch('boat_sinker');
+        if(runBoatsSunk>=5) unlockAch('boat_sinker');
         for(let i=0;i<8;i++){
           const p=new Particle(this.x+rnd(-30,30),this.y+rnd(-12,12),2);
           p.text=['~','·','*'][Math.floor(rnd(0,3))];
@@ -1510,6 +1545,7 @@ class Shark {
       if (g.y < H_STAGE3+45) continue;  // not in water, skip
       if (Math.hypot(g.x-this.x,g.y-this.y)<42){
         gulls.splice(i,1);
+        statGullsKilled++;
         // Simple splash — no emoji
         for(let j=0;j<2;j++){
           const p=new Particle(this.x+rnd(-10,10),this.y+rnd(-6,6),1);
@@ -1583,13 +1619,7 @@ class Helicopter {
   }
   update() {
     if (this.crashed) {
-      // Permanent wreck — smoke forever, never despawns
-      if (Math.random()<0.04){
-        const p=new Particle(this.x+rnd(-18,18),this.y+rnd(-12,12),1);
-        p.text='~'; p.col='#636e72'; p.vx=rnd(-0.4,0.4); p.vy=-0.8; p.dec=0.01;
-        particles.push(p);
-      }
-      return;  // alive stays true — wreck is permanent
+      return;  // permanent wreck, no smoke
     }
 
     this.rotorAngle += this.tailBroken ? 0.08+this.spiralSpeed*0.5 : 0.22;
@@ -1617,6 +1647,8 @@ class Helicopter {
         scorePopup(this.x, this.y-45, heliGain, '#ffd700');
         playHeliCrash();
         unlockAch('heli_killer');
+        // Big permanent scorch on the ground where it lands
+        worldDamage.scorchMarks.push({x:this.x, y:this.y, big:true});
         for(let i=0;i<22;i++){
           const p=new Particle(this.x+rnd(-55,55),this.y+rnd(-40,40),4);
           p.text=['💥','🔥','BOOM','!!!','★'][Math.floor(rnd(0,5))];
@@ -1658,6 +1690,7 @@ class Helicopter {
       if(d<52){
         if(Math.random()<0.15){
           gulls.splice(i,1); kills++;
+          statGullsKilled++;
           playDeathSquawk();
           if(Math.random()<0.7){
             const p=new Particle(g.x+rnd(-6,6),g.y+rnd(-4,4),1);
@@ -1835,17 +1868,36 @@ function drawBackground() {
     for(let s=-t.w/2+5;s<t.w/2;s+=8) ctx.fillRect(s,-t.h/2,3,t.h);
     ctx.restore();
   }
-  for(const u of UMBRELLAS){
-    ctx.strokeStyle='#8B4513'; ctx.lineWidth=2.5;
-    ctx.beginPath(); ctx.moveTo(u.x,u.y+28); ctx.lineTo(u.x,u.y-3); ctx.stroke();
-    ctx.fillStyle=u.c;
-    ctx.beginPath(); ctx.arc(u.x,u.y,30,Math.PI,Math.PI*2);
-    ctx.lineTo(u.x,u.y); ctx.closePath(); ctx.fill();
-    ctx.fillStyle='rgba(255,255,255,0.2)';
-    ctx.beginPath(); ctx.arc(u.x,u.y,30,Math.PI,Math.PI*1.5);
-    ctx.lineTo(u.x,u.y); ctx.closePath(); ctx.fill();
-    ctx.fillStyle='rgba(0,0,0,0.08)';
-    ctx.beginPath(); ctx.ellipse(u.x+12,u.y+30,25,7,0.15,0,Math.PI*2); ctx.fill();
+  for(let ui=0; ui<UMBRELLAS.length; ui++){
+    const u=UMBRELLAS[ui];
+    const knocked=worldDamage.umbrellaDown.includes(ui);
+    ctx.save(); ctx.translate(u.x, u.y);
+    if (knocked) {
+      // Ground shadow — flat ellipse at base, no rotation weirdness
+      ctx.fillStyle='rgba(0,0,0,0.15)';
+      ctx.beginPath(); ctx.ellipse(20, 28, 38, 8, 0, 0, Math.PI*2); ctx.fill();
+      // Pole — lying horizontal to the right
+      ctx.strokeStyle='#8B4513'; ctx.lineWidth=2.5;
+      ctx.beginPath(); ctx.moveTo(0, 26); ctx.lineTo(46, 26); ctx.stroke();
+      // Deflated canopy — flattened ellipse where canopy tip would land
+      ctx.fillStyle=u.c;
+      ctx.beginPath(); ctx.ellipse(46, 22, 22, 8, -0.15, 0, Math.PI*2); ctx.fill();
+      // Highlight strip on canopy
+      ctx.fillStyle='rgba(255,255,255,0.18)';
+      ctx.beginPath(); ctx.ellipse(46, 20, 14, 4, -0.15, 0, Math.PI*2); ctx.fill();
+    } else {
+      ctx.strokeStyle='#8B4513'; ctx.lineWidth=2.5;
+      ctx.beginPath(); ctx.moveTo(0,28); ctx.lineTo(0,-3); ctx.stroke();
+      ctx.fillStyle=u.c;
+      ctx.beginPath(); ctx.arc(0,0,30,Math.PI,Math.PI*2);
+      ctx.lineTo(0,0); ctx.closePath(); ctx.fill();
+      ctx.fillStyle='rgba(255,255,255,0.2)';
+      ctx.beginPath(); ctx.arc(0,0,30,Math.PI,Math.PI*1.5);
+      ctx.lineTo(0,0); ctx.closePath(); ctx.fill();
+      ctx.fillStyle='rgba(0,0,0,0.08)';
+      ctx.beginPath(); ctx.ellipse(12,30,25,7,0.15,0,Math.PI*2); ctx.fill();
+    }
+    ctx.restore();
   }
 
   // Ice cream stand
@@ -1918,6 +1970,24 @@ function drawBackground() {
     // Yellow center
     if(H>laneCenter){ ctx.strokeStyle='rgba(255,215,50,0.65)'; ctx.lineWidth=3; ctx.setLineDash([]); ctx.beginPath(); ctx.moveTo(0,laneCenter); ctx.lineTo(W,laneCenter); ctx.stroke(); }
     ctx.setLineDash([]);
+
+    // Tire tracks from crashed cars
+    if(worldDamage.tireTracks.length>0){
+      ctx.strokeStyle='rgba(0,0,0,0.35)'; ctx.lineWidth=3;
+      ctx.setLineDash([8,6]);
+      for(const t of worldDamage.tireTracks){
+        ctx.beginPath(); ctx.moveTo(t.x1,t.y1); ctx.lineTo(t.x2,t.y2); ctx.stroke();
+        // Second track ~8px offset
+        ctx.beginPath(); ctx.moveTo(t.x1,t.y1+8); ctx.lineTo(t.x2,t.y2+8); ctx.stroke();
+      }
+      ctx.setLineDash([]);
+    }
+    // Scorch marks — plain dark ellipses, big for helicopter, small for cars
+    for(const s of worldDamage.scorchMarks){
+      ctx.fillStyle='rgba(0,0,0,0.32)';
+      const rx=s.big?55:28, ry=s.big?22:12;
+      ctx.beginPath(); ctx.ellipse(s.x,s.y,rx,ry,0,0,Math.PI*2); ctx.fill();
+    }
     // Far sidewalk
     if(H>H_STAGE2+122){
       ctx.fillStyle='#8d9eaa'; ctx.fillRect(0,H_STAGE2+122,W,H-(H_STAGE2+122));
@@ -1963,15 +2033,16 @@ function drawBackground() {
 // ── STAGE 2 STOREFRONTS ─────────────────────────────────────
 function drawStorefronts() {
   const y = H_STAGE2 - 65;
-  // Three shop fronts along the bottom
   const shops = [
     {x:60,  w:140, col:'#e74c3c', label:'🍕 PIZZA'},
     {x:340, w:160, col:'#2980b9', label:'☕ CAFE'},
     {x:620, w:140, col:'#27ae60', label:'🍦 GELATO'},
   ];
-  for (const s of shops) {
+  for (let si=0; si<shops.length; si++) {
+    const s = shops[si];
+    const onFire = worldDamage.fireShops.includes(si);
     // Awning
-    ctx.fillStyle=s.col;
+    ctx.fillStyle = onFire ? '#7f1d1d' : s.col;
     ctx.beginPath();
     ctx.moveTo(s.x-8, y); ctx.lineTo(s.x+s.w+8, y);
     ctx.lineTo(s.x+s.w, y+18); ctx.lineTo(s.x, y+18);
@@ -1984,24 +2055,46 @@ function drawStorefronts() {
       ctx.closePath(); ctx.fill();
     }
     // Shopfront
-    fillRR(s.x, y+18, s.w, 47, 2, '#f5f5f5');
-    ctx.strokeStyle='rgba(0,0,0,0.15)'; ctx.lineWidth=1;
+    fillRR(s.x, y+18, s.w, 47, 2, onFire ? '#3a2020' : '#f5f5f5');
+    ctx.strokeStyle = onFire ? 'rgba(200,80,0,0.4)' : 'rgba(0,0,0,0.15)';
+    ctx.lineWidth=1;
     ctx.beginPath(); rrPath(s.x,y+18,s.w,47,2); ctx.stroke();
-    // Window
-    fillRR(s.x+12, y+24, s.w-24, 26, 3, 'rgba(173,216,230,0.55)');
+    // Window — cracked or normal
+    const hasCrack = worldDamage.crackPositions.some(c=>Math.abs(c.x-(s.x+s.w/2))<80);
+    if (hasCrack || onFire) {
+      ctx.fillStyle='rgba(100,130,150,0.25)';
+      fillRR(s.x+12, y+24, s.w-24, 26, 3, 'rgba(80,100,120,0.2)');
+      // Spider crack lines
+      ctx.strokeStyle='rgba(200,210,220,0.65)'; ctx.lineWidth=1;
+      const cx=s.x+s.w/2, cy=y+37;
+      for(let a=0;a<6;a++){
+        const ang=a*Math.PI/3+0.3;
+        ctx.beginPath();
+        ctx.moveTo(cx,cy);
+        ctx.lineTo(cx+Math.cos(ang)*14, cy+Math.sin(ang)*10);
+        ctx.stroke();
+      }
+    } else {
+      fillRR(s.x+12, y+24, s.w-24, 26, 3, 'rgba(173,216,230,0.55)');
+    }
     // Label
-    ctx.fillStyle='#333'; ctx.font='bold 11px Nunito'; ctx.textAlign='center';
+    ctx.fillStyle = onFire ? '#ff6b6b' : '#333';
+    ctx.font='bold 11px Nunito'; ctx.textAlign='center';
     ctx.fillText(s.label, s.x+s.w/2, y+56);
     // Outdoor table
-    const tx=s.x+s.w/2, ty=y-18;
+    const tx=s.x+s.w/2, ty2=y-18;
     ctx.fillStyle='#795548';
-    ctx.beginPath(); ctx.ellipse(tx, ty, 18, 8, 0, 0, Math.PI*2); ctx.fill();
+    ctx.beginPath(); ctx.ellipse(tx, ty2, 18, 8, 0, 0, Math.PI*2); ctx.fill();
     ctx.fillStyle='rgba(255,255,255,0.5)';
-    ctx.beginPath(); ctx.ellipse(tx, ty, 14, 5, 0, 0, Math.PI*2); ctx.fill();
-    // Two chairs
-    for(const cx of [tx-22, tx+22]){
+    ctx.beginPath(); ctx.ellipse(tx, ty2, 14, 5, 0, 0, Math.PI*2); ctx.fill();
+    for(const cx2 of [tx-22, tx+22]){
       ctx.fillStyle='#a1887f';
-      ctx.beginPath(); ctx.ellipse(cx, ty, 7, 4, 0, 0, Math.PI*2); ctx.fill();
+      ctx.beginPath(); ctx.ellipse(cx2, ty2, 7, 4, 0, 0, Math.PI*2); ctx.fill();
+    }
+    // Fire overlay — no smoke particles (performance)
+    if (onFire) {
+      ctx.font='18px sans-serif'; ctx.textAlign='center';
+      ctx.fillText('🔥', s.x+s.w/2, y+8);
     }
   }
 }
@@ -2268,9 +2361,9 @@ const MENU_BTNS={
   achievements: {x:W/2-248,y:416,w:126,h:58},
 };
 const DIFF_LABELS={
-  easy:  {label:'EASY',  desc:'2 min · +20s bonuses · ×0.5 score', col:'#00b894'},
-  normal:{label:'NORMAL',desc:'90s · +15s bonuses · ×1.0 score',   col:'#fdcb6e'},
-  hard:  {label:'HARD',  desc:'60s · +10s bonuses · ×2.5 score',   col:'#d63031'},
+  easy:  {label:'EASY',  sub:'Fewer Hazards · +20s Bonuses', mult:'×0.5 Score', col:'#00b894'},
+  normal:{label:'NORMAL',sub:'Standard · +15s Bonuses',      mult:'×1.0 Score', col:'#fdcb6e'},
+  hard:  {label:'HARD',  sub:'Max Hazards · +10s Bonuses',   mult:'×2.5 Score', col:'#d63031'},
 };
 
 function drawMenu(){
@@ -2305,28 +2398,35 @@ function drawMenu(){
   ctx.fillText('— SELECT DIFFICULTY —',W/2,320);
   for(const [key,cfg] of Object.entries(DIFF_LABELS)){
     const b=MENU_BTNS[key], sel=difficulty===key;
+    const cx=b.x+b.w/2;
     ctx.save();
     if(sel){ctx.shadowBlur=18; ctx.shadowColor=cfg.col;}
     fillRR(b.x,b.y,b.w,b.h,9,sel?cfg.col:'rgba(255,255,255,0.18)');
     if(sel){ctx.strokeStyle='rgba(0,0,0,0.3)';ctx.lineWidth=2;ctx.beginPath();rrPath(b.x,b.y,b.w,b.h,9);ctx.stroke();}
-    ctx.shadowBlur=0;
-    // Label — use letterSpacing to prevent overlap, smaller size
-    ctx.font='18px Bangers'; ctx.textAlign='center';
-    if(ctx.letterSpacing!==undefined) ctx.letterSpacing='1px';
-    ctx.strokeStyle='rgba(0,0,0,0.55)'; ctx.lineWidth=3; ctx.lineJoin='round';
-    ctx.strokeText(cfg.label,b.x+b.w/2,b.y+28);
-    ctx.fillStyle='#fff';
-    ctx.fillText(cfg.label,b.x+b.w/2,b.y+28);
+    ctx.shadowBlur=0; ctx.textAlign='center';
+    // Difficulty name
+    ctx.font='16px Bangers';
+    if(ctx.letterSpacing!==undefined) ctx.letterSpacing='2px';
+    ctx.strokeStyle='rgba(0,0,0,0.6)'; ctx.lineWidth=3; ctx.lineJoin='round';
+    ctx.strokeText(cfg.label,cx,b.y+17);
+    ctx.fillStyle='#fff'; ctx.fillText(cfg.label,cx,b.y+17);
     if(ctx.letterSpacing!==undefined) ctx.letterSpacing='0px';
-    ctx.fillStyle=sel?'rgba(255,255,255,0.9)':'rgba(255,255,255,0.58)';
-    ctx.font='10px Nunito';
-    ctx.fillText(cfg.desc,b.x+b.w/2,b.y+42);
-    // Per-difficulty best score below button
+    // Sub — hazards/bonus, small with shadow
+    ctx.shadowBlur=2; ctx.shadowColor='rgba(0,0,0,0.7)';
+    ctx.fillStyle=sel?'rgba(255,255,255,0.95)':'rgba(255,255,255,0.72)';
+    ctx.font='8px Nunito';
+    ctx.fillText(cfg.sub,cx,b.y+29);
+    // Multiplier — slightly bigger, visually important
+    ctx.font=sel?'700 12px Nunito':'700 11px Nunito';
+    ctx.fillStyle='#fff';
+    ctx.fillText(cfg.mult,cx,b.y+44);
+    ctx.shadowBlur=0;
+    // Best score below button
     const db=bestScores[key];
     if(db>0){
       ctx.fillStyle=sel?'#ffeaa7':'rgba(255,255,255,0.4)';
       ctx.font='700 10px Nunito';
-      ctx.fillText('⭐ '+db,b.x+b.w/2,b.y+b.h+14);
+      ctx.fillText('⭐ '+db,cx,b.y+b.h+14);
     }
     ctx.restore();
   }
@@ -2348,38 +2448,46 @@ function drawMenu(){
   // Achievements button — left of play
   const ab=MENU_BTNS.achievements;
   ctx.save();
-  ctx.shadowBlur=12; ctx.shadowColor='rgba(255,215,0,0.5)';
-  fillRR(ab.x,ab.y,ab.w,ab.h,12,'rgba(255,215,0,0.18)');
-  ctx.strokeStyle='rgba(255,215,0,0.5)'; ctx.lineWidth=2;
+  ctx.shadowBlur=10; ctx.shadowColor='rgba(0,0,0,0.4)';
+  fillRR(ab.x,ab.y,ab.w,ab.h,12,'rgba(0,0,0,0.45)');
+  ctx.strokeStyle='rgba(255,215,0,0.55)'; ctx.lineWidth=2;
   ctx.beginPath(); rrPath(ab.x,ab.y,ab.w,ab.h,12); ctx.stroke();
   ctx.shadowBlur=0;
   ctx.font='16px Bangers'; ctx.textAlign='center';
   if(ctx.letterSpacing!==undefined) ctx.letterSpacing='1px';
-  ctx.strokeStyle='rgba(0,0,0,0.4)'; ctx.lineWidth=2; ctx.lineJoin='round';
+  ctx.strokeStyle='rgba(0,0,0,0.6)'; ctx.lineWidth=3; ctx.lineJoin='round';
   ctx.strokeText('🏆  AWARDS',ab.x+ab.w/2,ab.y+24);
   ctx.fillStyle='#ffd700'; ctx.fillText('🏆  AWARDS',ab.x+ab.w/2,ab.y+24);
-  ctx.fillStyle='rgba(255,255,255,0.45)'; ctx.font='10px Nunito';
+  ctx.fillStyle='rgba(255,255,255,0.6)'; ctx.font='10px Nunito';
+  ctx.shadowBlur=2; ctx.shadowColor='rgba(0,0,0,0.8)';
   ctx.fillText(unlockedAch.size+'/'+ACH.length+' unlocked',ab.x+ab.w/2,ab.y+40);
+  ctx.shadowBlur=0;
   if(ctx.letterSpacing!==undefined) ctx.letterSpacing='0px';
   ctx.restore();
   const tb=MENU_BTNS.tutorial;
   ctx.save();
-  ctx.shadowBlur=12; ctx.shadowColor='rgba(162,155,254,0.5)';
-  fillRR(tb.x,tb.y,tb.w,tb.h,12,'rgba(162,155,254,0.25)');
-  ctx.strokeStyle='rgba(162,155,254,0.6)'; ctx.lineWidth=2;
+  ctx.shadowBlur=10; ctx.shadowColor='rgba(0,0,0,0.4)';
+  fillRR(tb.x,tb.y,tb.w,tb.h,12,'rgba(0,0,0,0.45)');
+  ctx.strokeStyle='rgba(162,155,254,0.55)'; ctx.lineWidth=2;
   ctx.beginPath(); rrPath(tb.x,tb.y,tb.w,tb.h,12); ctx.stroke();
   ctx.shadowBlur=0;
   ctx.font='16px Bangers'; ctx.textAlign='center';
   if(ctx.letterSpacing!==undefined) ctx.letterSpacing='1px';
-  ctx.strokeStyle='rgba(0,0,0,0.4)'; ctx.lineWidth=2; ctx.lineJoin='round';
+  ctx.strokeStyle='rgba(0,0,0,0.6)'; ctx.lineWidth=3; ctx.lineJoin='round';
   ctx.strokeText('❓  HOW TO PLAY',tb.x+tb.w/2,tb.y+24);
   ctx.fillStyle='#fff'; ctx.fillText('❓  HOW TO PLAY',tb.x+tb.w/2,tb.y+24);
-  ctx.fillStyle='rgba(255,255,255,0.45)'; ctx.font='10px Nunito';
+  ctx.fillStyle='rgba(255,255,255,0.65)'; ctx.font='10px Nunito';
+  ctx.shadowBlur=2; ctx.shadowColor='rgba(0,0,0,0.8)';
   ctx.fillText('mechanics & tips',tb.x+tb.w/2,tb.y+40);
+  ctx.shadowBlur=0;
   if(ctx.letterSpacing!==undefined) ctx.letterSpacing='0px';
   ctx.restore();
-  ctx.fillStyle='rgba(255,255,255,0.38)'; ctx.font='12px Nunito'; ctx.textAlign='center';
-  ctx.fillText('Click beach to drop chip lures  ·  Bigger flocks = more chaos  ·  Grow your flock!',W/2,H-12);
+  const hintY=H-20, hintTxt='🦅  Bigger flock = more chaos  ·  Reach 25 gulls to unlock the Promenade  ·  Surprises await  🦅';
+  ctx.font='12px Nunito'; ctx.textAlign='center';
+  const hintW=ctx.measureText(hintTxt).width+24;
+  fillRR(W/2-hintW/2, hintY-14, hintW, 18, 9, 'rgba(0,0,0,0.42)');
+  ctx.fillStyle='rgba(255,255,255,0.72)';
+  ctx.fillText(hintTxt,W/2,hintY);
 }
 
 // ── TUTORIAL ────────────────────────────────────────────────
@@ -2408,11 +2516,11 @@ function drawTutorial() {
     {icon:'🍟',head:'Chip Lures',         body:'Click to drop a chip — your flock immediately launches toward it. Chips recharge over time. 3 max.'},
     {icon:'🦅',head:'Grow Your Flock',    body:'Scaring beachgoers fills the Growth Meter. Full meter = new gull arrives from the sea.'},
     {icon:'😱',head:'Cause Chaos',        body:'Bigger flocks = more score per NPC. Trap groups inside your flock for chain reactions!'},
+    {icon:'⏱',head:'Time',              body:'You start with 90 seconds. Each new stage adds +30s. Scoring adds bonus time — Easy gets more than Hard.'},
     {icon:'🐕',head:'Dog Walkers',        body:'Dogs scatter your flock on contact. Their path curves toward your birds — plan accordingly.'},
     {icon:'🚔',head:'Police Officers',    body:'Police drain your timer while gulls are inside their radius. Avoid their patrol zone!'},
     {icon:'🚗',head:'Road Zone',          body:'Unlocks at 75 gulls. Cars cross the road and kill on contact. Keep your flock moving!'},
     {icon:'🦈',head:'Harbor',             body:'Unlocks at 150 gulls. Sharks eat low-flying gulls. Use your flock to sink boats for big score!'},
-    {icon:'⭐',head:'News Van',           body:'Rarely appears in the road zone. Swarm it for a 2× score multiplier for 30 seconds!'},
   ];
 
   const cw=W/2-32;
@@ -2453,61 +2561,82 @@ function drawGameOver(){
   saveBest();
   ctx.fillStyle='rgba(0,0,0,0.72)'; ctx.fillRect(0,0,W,H);
   ctx.textAlign='center';
+  // Title
   ctx.fillStyle='#fd79a8'; ctx.font='64px Bangers';
-  ctx.fillText('BEACH CHAOS COMPLETE!',W/2,140);
-  fillRR(W/2-155,155,310,145,12,'rgba(255,255,255,0.07)');
-  ctx.fillStyle='rgba(255,255,255,0.55)'; ctx.font='700 16px Nunito';
-  ctx.fillText('RAW SCORE',W/2,182);
-  ctx.fillStyle='rgba(255,255,255,0.45)'; ctx.font='22px Bangers';
-  ctx.fillText(Math.floor(score),W/2,210);
+  ctx.strokeStyle='rgba(0,0,0,0.4)'; ctx.lineWidth=5; ctx.lineJoin='round';
+  ctx.strokeText('BEACH CHAOS COMPLETE!',W/2,115);
+  ctx.fillText('BEACH CHAOS COMPLETE!',W/2,115);
+
   const diffMult=DIFF[difficulty].scoreMult;
   const finalScore=Math.floor(score*diffMult);
-  if(diffMult!==1){
-    ctx.fillStyle='rgba(255,255,255,0.45)'; ctx.font='700 12px Nunito';
-    ctx.fillText(`× ${diffMult} (${difficulty.toUpperCase()}) =`,W/2,232);
+  const hasMultLine=(diffMult!==1.0);
+
+  fillRR(W/2-180,128,360,hasMultLine?185:155,12,'rgba(255,255,255,0.07)');
+
+  if(hasMultLine){
+    ctx.fillStyle='rgba(255,255,255,0.5)'; ctx.font='700 12px Nunito';
+    ctx.fillText('RAW SCORE',W/2,148);
+    ctx.fillStyle='rgba(255,255,255,0.6)'; ctx.font='20px Bangers';
+    ctx.fillText(Math.floor(score),W/2,170);
+    ctx.fillStyle='rgba(255,255,255,0.4)'; ctx.font='700 12px Nunito';
+    ctx.fillText(`× ${diffMult} (${difficulty.toUpperCase()}) =`,W/2,188);
   }
-  ctx.fillStyle='#ffeaa7'; ctx.font='62px Bangers';
-  ctx.fillText(finalScore,W/2,290);
-  ctx.fillStyle='rgba(255,255,255,0.4)'; ctx.font='700 11px Nunito';
-  ctx.fillText('FINAL SCORE',W/2,307);
+  // Final score — big
+  ctx.fillStyle='#ffeaa7'; ctx.font='68px Bangers';
+  ctx.shadowBlur=18; ctx.shadowColor='rgba(255,220,100,0.4)';
+  ctx.fillText(finalScore, W/2, hasMultLine ? 248 : 218);
+  ctx.shadowBlur=0;
+
+  // Rating — directly below final score, no overlap
+  const ratingY = hasMultLine ? 270 : 240;
   const s=finalScore;
   let rtxt,rcol;
-  if     (s>=50000){rtxt='🦅 SQUAWKPOCALYPSE';              rcol='#ffd700';}
+  if     (s>=50000){rtxt='🦅 SQUAWKPOCALYPSE';            rcol='#ffd700';}
   else if(s>=20000){rtxt='🦅 ABSOLUTE SQUAWKPOCALYPSE';   rcol='#e17055';}
   else if(s>=10000){rtxt='💥 TOTAL BEACH MAYHEM';         rcol='#fd79a8';}
   else if(s>= 2000){rtxt='🌊 SIGNIFICANT DISTURBANCE';   rcol='#fdcb6e';}
   else if(s>=  700){rtxt='🚨 NOTABLE INCIDENT';          rcol='#00b894';}
   else if(s>=  200){rtxt='😤 MILD NUISANCE';             rcol='#74b9ff';}
   else             {rtxt='🐦 BARELY A BIRDY';            rcol='#a29bfe';}
-  ctx.fillStyle=rcol; ctx.font='700 22px Nunito'; ctx.fillText(rtxt,W/2,300);
-  ctx.fillStyle='rgba(255,255,255,0.5)'; ctx.font='700 15px Nunito';
-  ctx.fillText('Final flock: '+gulls.length+' seagulls',W/2,325);
-  // Best score — saveBest() already called when timer hit 0
+  ctx.fillStyle=rcol; ctx.font='700 18px Nunito'; ctx.fillText(rtxt,W/2,ratingY);
+
+  ctx.fillStyle='rgba(255,255,255,0.5)'; ctx.font='700 14px Nunito';
+  ctx.fillText('Final flock: '+gulls.length+' seagulls',W/2,ratingY+22);
+
+  // Run stats
+  ctx.fillStyle='rgba(255,255,255,0.32)'; ctx.font='700 11px Nunito';
+  const stats=[
+    '🪦 '+statGullsKilled+' gulls',
+    '🚔 '+runPoliceOverwhelmed+' cops',
+    '🚗 '+runCarCrashes+' crashes',
+    '⚓ '+runBoatsSunk+' boats',
+    '📺 '+runNewsVans+' vans',
+  ];
+  ctx.fillText(stats.join('   '),W/2,ratingY+40);
+
+  // Best score
   const thisScore=Math.floor(score);
-  const isNew = bestScore===thisScore && thisScore>0; // bestScore was just updated by saveBest
+  const isNew = bestScore===thisScore && thisScore>0;
   ctx.fillStyle = isNew ? '#ffd700' : 'rgba(255,255,255,0.38)';
-  ctx.font='700 13px Nunito';
-  if (isNew) {
-    ctx.fillText('⭐ NEW BEST: '+thisScore, W/2, 348);
-  } else if (bestScore>0) {
-    ctx.fillText('Your best: '+bestScore, W/2, 348);
-  }
+  ctx.font='700 12px Nunito';
+  if (isNew) { ctx.fillText('⭐ NEW BEST: '+finalScore, W/2, ratingY+58); }
+  else if (bestScore>0) { ctx.fillText('Your best: '+bestScore, W/2, ratingY+58); }
+
   ctx.shadowBlur=18; ctx.shadowColor='#00b894';
-  fillRR(W/2-188,368,168,52,10,'#00b894');
+  fillRR(W/2-188,ratingY+70,168,48,10,'#00b894');
   ctx.shadowBlur=0; ctx.font='18px Bangers'; ctx.textAlign='center';
   if(ctx.letterSpacing!==undefined) ctx.letterSpacing='1px';
   ctx.strokeStyle='rgba(0,0,0,0.5)'; ctx.lineWidth=3; ctx.lineJoin='round';
-  ctx.strokeText('▶  PLAY AGAIN',W/2-104,400);
-  ctx.fillStyle='#fff'; ctx.fillText('▶  PLAY AGAIN',W/2-104,400);
+  ctx.strokeText('▶  PLAY AGAIN',W/2-104,ratingY+100);
+  ctx.fillStyle='#fff'; ctx.fillText('▶  PLAY AGAIN',W/2-104,ratingY+100);
   ctx.shadowBlur=18; ctx.shadowColor='#6c5ce7';
-  fillRR(W/2+20,368,168,52,10,'#6c5ce7');
-  ctx.shadowBlur=0; ctx.font='18px Bangers';
-  ctx.strokeStyle='rgba(0,0,0,0.5)'; ctx.lineWidth=3; ctx.lineJoin='round';
-  ctx.strokeText('⬡  MAIN MENU',W/2+104,400);
-  ctx.fillStyle='#fff'; ctx.fillText('⬡  MAIN MENU',W/2+104,400);
+  fillRR(W/2+20,ratingY+70,168,48,10,'#6c5ce7');
+  ctx.shadowBlur=0;
+  ctx.strokeText('⬡  MAIN MENU',W/2+104,ratingY+100);
+  ctx.fillStyle='#fff'; ctx.fillText('⬡  MAIN MENU',W/2+104,ratingY+100);
   if(ctx.letterSpacing!==undefined) ctx.letterSpacing='0px';
-  ctx.fillStyle='rgba(255,255,255,0.3)'; ctx.font='12px Nunito';
-  ctx.fillText('Tip: change difficulty on the main menu!',W/2,440);
+  ctx.fillStyle='rgba(255,255,255,0.28)'; ctx.font='12px Nunito';
+  ctx.fillText('Tip: change difficulty on the main menu!',W/2,ratingY+134);
 }
 
 // ── AUDIO ──────────────────────────────────────────────────
@@ -2697,7 +2826,9 @@ function initGame(){
   boats=[]; sharks=[];
   helicopter=null; helicopterSpawned=false;
   stopHeliEngine();
+  initWorldDamage();
   runBoatsSunk=0; runCarCrashes=0; runPoliceOverwhelmed=0; runNewsVans=0; flockedWiped=false;
+  statGullsKilled=0;
   score=0; growthMeter=0; newGullFlash=0;
   chipCharges=CHIP_MAX; chipTimer=CHIP_RECHARGE;
   gameTimer=cfg.secs; npcSpawnTimer=5;
@@ -2758,8 +2889,11 @@ canvas.addEventListener('click',e=>{
     return;
   }
   if(state==='gameover'){
-    if(mx>=W/2-188&&mx<=W/2-20&&my>=375&&my<=427){state='playing'; initGame();}
-    if(mx>=W/2+20&&mx<=W/2+188&&my>=375&&my<=427){
+    const diffMult2=DIFF[difficulty].scoreMult;
+    const rY=diffMult2!==1?270:240;
+    const bY=rY+70;
+    if(mx>=W/2-188&&mx<=W/2-20&&my>=bY&&my<=bY+48){state='playing'; initGame();}
+    if(mx>=W/2+20&&mx<=W/2+188&&my>=bY&&my<=bY+48){
       state='menu'; stopHeliEngine(); H=H_BASE; canvas.height=H; resize();
     }
   }
@@ -2899,8 +3033,8 @@ function loop(){
       // News van — rare, unpredictable, auto-despawns
       pickupSpawnTimer--;
       if (pickupSpawnTimer<=0 && H>=H_STAGE3-20 && pickups.length===0) {
-        if (Math.random()<0.6) pickups.push(new NewsVan()); // 60% chance to actually appear
-        pickupSpawnTimer=rnd(2400,5400)|0;  // 40–90s between rolls
+        pickups.push(new NewsVan());
+        pickupSpawnTimer=rnd(2400,5400)|0;
       }
       cars   =cars.filter(c=>{c.update(); return c.alive;});
       pickups=pickups.filter(p=>{p.update(); return p.alive;});
@@ -2911,16 +3045,19 @@ function loop(){
       stage=2; stageTransition=true; stageTransitionFrame=0;
       stageUnlockBanner=220; gameTimer+=30;
       cyclistSpawnTimer=300; dinerRespawnTimer=120; policeSpawnTimer=400;
+      triggerStage2Damage();
     }
     if (stage===2 && gulls.length>=STAGE3_FLOCK) {
       stage=3; stageTransition=true; stageTransitionFrame=0;
       stageUnlockBanner=220; gameTimer+=30;
       carSpawnTimer=200; pickupSpawnTimer=1200;
+      triggerStage3Damage();
     }
     if (stage===3 && gulls.length>=STAGE4_FLOCK) {
       stage=4; stageTransition=true; stageTransitionFrame=0;
-      stageUnlockBanner=220; gameTimer+=40;
+      stageUnlockBanner=220; gameTimer+=30;
       boatSpawnTimer=300; sharkSpawnTimer=600;
+      triggerStage4Damage();
     }
 
     // ── Stage 4 entities: boats + sharks ─────────────────
