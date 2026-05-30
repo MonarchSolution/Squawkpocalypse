@@ -1,0 +1,3183 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>SQUAWKPOCALYPSE</title>
+<link href="https://fonts.googleapis.com/css2?family=Bangers&family=Nunito:wght@700;900&display=swap" rel="stylesheet">
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body { background:#1a1a2e; display:flex; justify-content:center; align-items:center; height:100vh; overflow:hidden; }
+  canvas { display:block; cursor:crosshair; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script>
+// ============================================================
+//  SQUAWKPOCALYPSE  —  Phase 1 v2
+//  Resting flock. Chips launch them. Bigger flocks = more chaos.
+// ============================================================
+
+const canvas = document.getElementById('c');
+const ctx    = canvas.getContext('2d');
+const W = 900;
+const H_BASE = 580;   // original beach height — never changes
+const H_STAGE2 = 750; // expanded height once promenade unlocks
+let   H = H_BASE;     // current world height — grows during stage transition
+canvas.width = W; canvas.height = H;
+
+function resize() {
+  const s = Math.min(window.innerWidth / W, window.innerHeight / H);
+  canvas.style.width  = (W * s) + 'px';
+  canvas.style.height = (H * s) + 'px';
+}
+window.addEventListener('resize', resize);
+resize();
+
+// ── HELPERS ────────────────────────────────────────────────
+const rnd   = (a, b) => a + Math.random() * (b - a);
+const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+
+function rrPath(x, y, w, h, r) {
+  if (ctx.roundRect) { ctx.roundRect(x, y, w, h, r); return; }
+  ctx.moveTo(x+r, y);
+  ctx.lineTo(x+w-r, y);    ctx.quadraticCurveTo(x+w, y,     x+w, y+r);
+  ctx.lineTo(x+w, y+h-r);  ctx.quadraticCurveTo(x+w, y+h,   x+w-r, y+h);
+  ctx.lineTo(x+r, y+h);    ctx.quadraticCurveTo(x,   y+h,   x,     y+h-r);
+  ctx.lineTo(x, y+r);      ctx.quadraticCurveTo(x,   y,     x+r,   y);
+  ctx.closePath();
+}
+function fillRR(x, y, w, h, r, fill) {
+  ctx.beginPath(); rrPath(x,y,w,h,r); ctx.fillStyle=fill; ctx.fill();
+}
+function fillStrokeRR(x, y, w, h, r, fill, stroke, lw=2) {
+  ctx.beginPath(); rrPath(x,y,w,h,r);
+  ctx.fillStyle=fill; ctx.fill();
+  ctx.strokeStyle=stroke; ctx.lineWidth=lw; ctx.stroke();
+}
+
+// ── CONFIG ─────────────────────────────────────────────────
+const CHIP_MAX       = 3;
+const CHIP_RECHARGE  = 150;   // reduced from 210 — more player agency
+const CHAOS_PER_GULL = 10;  // chaos points needed to earn one new gull
+
+const DIFF = {
+  easy: {
+    startGulls:8, npcCount:9, secs:90,
+    dogRate:0.0004, dogR:92,
+    carRate:220,   carSpd:[4.5,7],
+    sharkMax:1, heliSpd:1.8, policeRate:700,
+    timeBonus:20, scoreMult:0.5,
+    desc:'Fewer hazards · +20s bonuses · ×0.5 score',
+  },
+  normal: {
+    startGulls:8, npcCount:10, secs:90,
+    dogRate:0.0018, dogR:92,
+    carRate:180,   carSpd:[5,8.5],
+    sharkMax:2, heliSpd:2.2, policeRate:500,
+    timeBonus:15, scoreMult:1.0,
+    desc:'Standard · +15s bonuses · ×1.0 score',
+  },
+  hard: {
+    startGulls:8, npcCount:10, secs:90,
+    dogRate:0.0055, dogR:92,
+    carRate:130,   carSpd:[6,11],
+    sharkMax:3, heliSpd:3.0, policeRate:300,
+    timeBonus:10, scoreMult:2.5,
+    desc:'Max hazards · +10s bonuses · ×2.5 score',
+  },
+};
+
+const UMBRELLAS = [
+  {x:148,y:218,c:'#e74c3c'},{x:378,y:288,c:'#3498db'},
+  {x:598,y:178,c:'#2ecc71'},{x:733,y:348,c:'#f39c12'},
+  {x:258,y:418,c:'#9b59b6'},{x:658,y:442,c:'#e74c3c'},
+];
+const TOWELS = [
+  {x:145,y:246,w:42,h:20,c:'#c0392b',r:-0.10},
+  {x:373,y:315,w:45,h:19,c:'#2980b9',r: 0.15},
+  {x:593,y:205,w:38,h:22,c:'#27ae60',r:-0.05},
+  {x:728,y:374,w:42,h:19,c:'#d68910',r: 0.10},
+  {x:254,y:444,w:40,h:21,c:'#8e44ad',r:-0.12},
+  {x:654,y:466,w:44,h:18,c:'#c0392b',r: 0.08},
+];
+
+// ── GAME STATE ─────────────────────────────────────────────
+let state      = 'menu';   // 'menu' | 'tutorial' | 'playing' | 'gameover'
+let difficulty = 'normal';
+let frame      = 0;
+let gulls=[], npcs=[], chips=[], dogs=[], particles=[];
+let cyclists=[], diners=[], foodDrops=[];
+let cars=[], police=[], pickups=[];
+let boats=[], sharks=[];                 // stage 4 harbor entities
+let helicopter=null; let helicopterSpawned=false;
+let score=0, growthMeter=0;
+let statGullsKilled=0;  // gulls killed by cars/sharks/helicopter
+let scoreMultiplier=1, multiplierTimer=0;    // golden lure bonus
+let goldFlash=0;                             // full-screen flash when lure collected
+let chipCharges=CHIP_MAX, chipTimer=CHIP_RECHARGE;
+let gameTimer=90, timerInterval=null;
+let newGullFlash=0;
+let npcSpawnTimer=0;
+let cyclistSpawnTimer=0, dinerRespawnTimer=0;
+let carSpawnTimer=0, policeSpawnTimer=0, pickupSpawnTimer=0;
+let boatSpawnTimer=0, sharkSpawnTimer=0;
+let policeRadioActive=false, policeTimerDrain=0;
+let nextTimeMilestone=100;
+let timeBonusFlash=0;
+let newsScrollX=W;                           // news ticker scroll position
+let newsMsg='';  let newsMsgTimer=0;         // current scrolling headline
+
+// ── BEST SCORE ─────────────────────────────────────────────
+// Separate best for each difficulty
+const bestScores = {easy:0, normal:0, hard:0};
+try {
+  for(const d of ['easy','normal','hard'])
+    bestScores[d]=parseInt(localStorage.getItem('squawk_best_'+d)||'0')||0;
+} catch(e){}
+function saveBest() {
+  const finalScore=Math.floor(score*DIFF[difficulty].scoreMult);
+  if (finalScore>bestScores[difficulty]) {
+    bestScores[difficulty]=finalScore;
+    try { localStorage.setItem('squawk_best_'+difficulty, finalScore); } catch(e){}
+  }
+  // Achievements checked at game end
+  if(finalScore>=50000) unlockAch('legend');
+}
+// Keep backward-compat reference used in drawGameOver
+Object.defineProperty(window,'bestScore',{get:()=>bestScores[difficulty]});
+
+// ── ACHIEVEMENTS ───────────────────────────────────────────
+const ACH = [
+  { id:'last_squawk',  icon:'💀', name:'Murder Most Fowl',         desc:'Lose every last gull before time runs out.'              },
+  { id:'heli_killer',  icon:'🚁', name:'Black Squawk Down',        desc:'Bring down the helicopter.'                              },
+  { id:'mega_flock',   icon:'🦅', name:'Hitchcock Would Be Proud', desc:'Reach 500 gulls in a single run.'                       },
+  { id:'boat_sinker',  icon:'⚓', name:'The Birdmuda Triangle',    desc:'Sink 5 boats in a single run.'                          },
+  { id:'road_rage',    icon:'🚗', name:'No Tern Signal',           desc:'Cause 10 car crashes by herding people into traffic.'   },
+  { id:'deflock',      icon:'🚔', name:'Until Proven Gullty',      desc:'Overwhelm 15 police officers in a single run.'          },
+  { id:'legend',       icon:'🌟', name:'A Fowl Legacy',            desc:'Reach a final score of 50,000.'                         },
+  { id:'news_van',     icon:'📺', name:"You're On The Air",        desc:'Activate the news van 3 times in a single run.'         },
+];
+let unlockedAch = new Set();
+try { JSON.parse(localStorage.getItem('squawk_ach')||'[]').forEach(id=>unlockedAch.add(id)); } catch(e){}
+
+// Per-run achievement counters (reset in initGame)
+let runBoatsSunk=0, runCarCrashes=0, runPoliceOverwhelmed=0, runNewsVans=0;
+let flockedWiped=false;
+
+// Notification queue
+let achNotifQueue=[], achNotifCurrent=null, achNotifTimer=0;
+
+function unlockAch(id){
+  if(unlockedAch.has(id)) return;
+  unlockedAch.add(id);
+  try { localStorage.setItem('squawk_ach',JSON.stringify([...unlockedAch])); } catch(e){}
+  achNotifQueue.push(id);
+}
+
+function drawAchNotif(){
+  if(!achNotifCurrent && achNotifQueue.length>0){
+    achNotifCurrent=achNotifQueue.shift(); achNotifTimer=210;
+  }
+  if(!achNotifCurrent) return;
+  achNotifTimer--;
+  if(achNotifTimer<=0){ achNotifCurrent=null; return; }
+  const def=ACH.find(a=>a.id===achNotifCurrent);
+  if(!def) return;
+  const alpha=Math.min(1,achNotifTimer/25)*Math.min(1,(achNotifTimer-5)/30);
+  const nx=W-188, ny=92;
+  ctx.save(); ctx.globalAlpha=alpha;
+  ctx.shadowBlur=16; ctx.shadowColor='#ffd700';
+  fillRR(nx,ny,176,58,8,'rgba(0,0,0,0.85)');
+  ctx.strokeStyle='#ffd700'; ctx.lineWidth=1.5;
+  ctx.beginPath(); rrPath(nx,ny,176,58,8); ctx.stroke();
+  ctx.shadowBlur=0;
+  ctx.fillStyle='#ffd700'; ctx.font='700 9px Nunito'; ctx.textAlign='left';
+  ctx.fillText('✦ ACHIEVEMENT UNLOCKED',nx+8,ny+14);
+  ctx.font='16px sans-serif'; ctx.fillText(def.icon,nx+8,ny+40);
+  ctx.fillStyle='#fff'; ctx.font='700 12px Nunito';
+  ctx.fillText(def.name,nx+34,ny+34);
+  ctx.fillStyle='rgba(255,255,255,0.55)'; ctx.font='10px Nunito';
+  ctx.fillText(def.desc.length>38?def.desc.slice(0,36)+'…':def.desc,nx+34,ny+48);
+  ctx.restore();
+}
+
+function drawAchievementScreen(){
+  const bg=ctx.createLinearGradient(0,0,0,H_BASE);
+  bg.addColorStop(0,'#1a1a2e'); bg.addColorStop(1,'#16213e');
+  ctx.fillStyle=bg; ctx.fillRect(0,0,W,H_BASE);
+  ctx.textAlign='center';
+  ctx.font='42px Bangers';
+  ctx.strokeStyle='rgba(0,0,0,0.5)'; ctx.lineWidth=4; ctx.lineJoin='round';
+  ctx.strokeText('ACHIEVEMENTS',W/2,52);
+  ctx.fillStyle='#ffd700'; ctx.fillText('ACHIEVEMENTS',W/2,52);
+  ctx.fillStyle='rgba(255,255,255,0.4)'; ctx.font='700 11px Nunito';
+  ctx.fillText(unlockedAch.size+' / '+ACH.length+' unlocked',W/2,70);
+
+  const cols=2, cw=W/2-32;
+  for(let i=0;i<ACH.length;i++){
+    const col=i%cols, row=Math.floor(i/cols);
+    const ax=(col===0?W/2-cw-8:W/2+8), ay=80+row*104;
+    const unlocked=unlockedAch.has(ACH[i].id);
+    fillRR(ax,ay,cw,92,8,unlocked?'rgba(255,215,0,0.1)':'rgba(255,255,255,0.04)');
+    ctx.strokeStyle=unlocked?'rgba(255,215,0,0.45)':'rgba(255,255,255,0.08)'; ctx.lineWidth=1;
+    ctx.beginPath(); rrPath(ax,ay,cw,92,8); ctx.stroke();
+    // Icon — silhouette when locked
+    if(unlocked){
+      ctx.font='28px sans-serif'; ctx.textAlign='left';
+      ctx.fillText(ACH[i].icon,ax+14,ay+46);
+    } else {
+      // Draw emoji as near-black silhouette using canvas filter
+      ctx.save();
+      if(ctx.filter!==undefined) ctx.filter='brightness(0) opacity(0.35)';
+      ctx.font='28px sans-serif'; ctx.textAlign='left';
+      ctx.fillText(ACH[i].icon,ax+14,ay+46);
+      if(ctx.filter!==undefined) ctx.filter='none';
+      ctx.restore();
+    }
+    // Name
+    if(unlocked){
+      ctx.fillStyle='#ffd700'; ctx.font='700 13px Nunito'; ctx.textAlign='left';
+      ctx.fillText(ACH[i].name,ax+52,ay+28);
+      ctx.fillStyle='rgba(255,255,255,0.65)'; ctx.font='11px Nunito';
+      // Word-wrap description
+      const words=ACH[i].desc.split(' '); let line='', ly=ay+44;
+      for(const wd of words){
+        const test=line+wd+' ';
+        if(ctx.measureText(test).width>cw-60&&line){ctx.fillText(line.trim(),ax+52,ly);line=wd+' ';ly+=14;}
+        else line=test;
+      }
+      ctx.fillText(line.trim(),ax+52,ly);
+    } else {
+      ctx.fillStyle='rgba(255,255,255,0.2)'; ctx.font='700 13px Nunito'; ctx.textAlign='left';
+      ctx.fillText('???',ax+52,ay+28);
+      ctx.fillStyle='rgba(255,255,255,0.12)'; ctx.font='11px Nunito';
+      ctx.fillText('Keep playing to unlock...',ax+52,ay+44);
+    }
+  }
+
+  // Back button
+  ctx.save();
+  ctx.shadowBlur=14; ctx.shadowColor='#ffd700';
+  fillRR(W/2-80,H_BASE-55,160,40,10,'rgba(255,215,0,0.25)');
+  ctx.strokeStyle='#ffd700'; ctx.lineWidth=2;
+  ctx.beginPath(); rrPath(W/2-80,H_BASE-55,160,40,10); ctx.stroke();
+  ctx.shadowBlur=0; ctx.font='16px Bangers'; ctx.textAlign='center';
+  if(ctx.letterSpacing!==undefined) ctx.letterSpacing='1px';
+  ctx.strokeStyle='rgba(0,0,0,0.4)'; ctx.lineWidth=2; ctx.lineJoin='round';
+  ctx.strokeText('← BACK TO MENU',W/2,H_BASE-29);
+  ctx.fillStyle='#fff'; ctx.fillText('← BACK TO MENU',W/2,H_BASE-29);
+  if(ctx.letterSpacing!==undefined) ctx.letterSpacing='0px';
+  ctx.restore();
+}
+let stage=1, stageTransition=false, stageTransitionFrame=0;
+let stageUnlockBanner=0;
+const STAGE2_FLOCK = 25;
+const STAGE3_FLOCK = 75;
+const STAGE4_FLOCK = 150;
+const HELICOPTER_FLOCK = 300;
+const H_STAGE3     = 950;
+const H_STAGE4     = 1150;
+
+// ── WORLD DAMAGE ──────────────────────────────────────────
+let worldDamage = {
+  umbrellaDown: [],   // UMBRELLA indices knocked sideways (stage 2)
+  crackPositions: [], // [{x,y,r,ang}] glass cracks on storefronts (stage 3)
+  tireTracks: [],     // [{x1,y1,x2,y2}] skid marks on road (stage 3)
+  fireShops: [],      // shop indices on fire (stage 4)
+  scorchMarks: [],    // [{x,y}] from crashed cars
+};
+function initWorldDamage(){
+  worldDamage={umbrellaDown:[],crackPositions:[],tireTracks:[],fireShops:[],scorchMarks:[]};
+}
+function triggerStage2Damage(){
+  const idxs=[...Array(UMBRELLAS.length).keys()];
+  const n=2+Math.floor(Math.random());
+  for(let i=0;i<n;i++){
+    const ri=Math.floor(Math.random()*idxs.length);
+    worldDamage.umbrellaDown.push(idxs.splice(ri,1)[0]);
+  }
+}
+function triggerStage3Damage(){
+  // Cracked windows on first 2 storefronts
+  const shopCX=[130,420,690];
+  for(let i=0;i<2;i++){
+    worldDamage.crackPositions.push(
+      {x:shopCX[i]+rnd(-20,20), y:H_STAGE2-68+rnd(-8,8), r:rnd(13,20), ang:rnd(0,Math.PI)}
+    );
+  }
+}
+function triggerStage4Damage(){
+  worldDamage.fireShops=[0,1,2];
+  // Tire tracks appear when harbor opens — city was already getting wrecked
+  for(let i=0;i<3;i++){
+    const ly=H_STAGE2+32+Math.floor(rnd(0,2))*58+rnd(-5,5);
+    worldDamage.tireTracks.push({x1:rnd(0,W*0.4),y1:ly+rnd(-3,3),x2:rnd(W*0.6,W),y2:ly+rnd(-3,3)});
+  }
+}
+function addScorchMark(x,y){
+  if(worldDamage.scorchMarks.length<20)
+    worldDamage.scorchMarks.push({x,y});
+}
+
+// ── GULL ───────────────────────────────────────────────────
+// Each gull is either RESTING (sitting on sand) or AIRBORNE (flying).
+// Chips launch resting gulls and override boid rules for airborne ones.
+// Dogs scatter both resting and airborne gulls dramatically.
+
+class Gull {
+  constructor(x, y) {
+    this.x  = x != null ? x : rnd(80, W-80);
+    this.y  = y != null ? y : rnd(110, H-55);
+    this.vx = 0; this.vy = 0;
+    this.maxSpd   = rnd(2.2, 3.0);
+    this.sz       = rnd(8, 11);
+    this.wp       = rnd(0, Math.PI*2);  // wing animation phase
+    this.faceAng  = -Math.PI/2;          // face up (north) when resting
+    this.airborne = false;
+    this.settleTimer = 0;  // frames left before friction/landing kicks in
+  }
+
+  update() {
+    // ── Find nearest chip ──────────────────────────────────
+    let nearChip = null, nearChipDist = Infinity;
+    for (const c of chips) {
+      const d = Math.hypot(c.x-this.x, c.y-this.y);
+      if (d < nearChipDist) { nearChipDist = d; nearChip = c; }
+    }
+    const hasChip = chips.length > 0;
+
+    // ── Find nearest dog's scare radius ───────────
+    let nearDog = null, nearDogDist = Infinity;
+    for (const dog of dogs) {
+      // Scare radius centred on the dog itself, not the owner
+      const d = Math.hypot(dog.dogX-this.x, dog.dogY-this.y);
+      if (d < dog.r && d < nearDogDist) { nearDogDist = d; nearDog = dog; }
+    }
+
+    // ═══════════════ RESTING ═══════════════════════════════
+    if (!this.airborne) {
+      if (nearDog) {
+        // SCATTER! Explosive launch away from dog
+        this.airborne = true;
+        this.settleTimer = 200;
+        const dx=this.x-nearDog.dogX, dy=this.y-nearDog.dogY;
+        const d=Math.hypot(dx,dy)+0.001;
+        this.vx = (dx/d)*this.maxSpd*2.5 + rnd(-0.8,0.8);
+        this.vy = (dy/d)*this.maxSpd*2.5 + rnd(-0.8,0.8);
+        // Feather burst — visual clue that dog just scattered the flock
+        if (Math.random()<0.45) {
+          const p=new Particle(this.x+rnd(-6,6), this.y+rnd(-4,4), 1);
+          p.text='🪶'; p.col='#e0e0e0';
+          p.vx=rnd(-1.5,1.5); p.vy=rnd(-2.5,-0.5);
+          p.dec=0.012;  // float longer
+          particles.push(p);
+        }
+      } else if (hasChip && nearChipDist < 420) {
+        // LAUNCH toward chip
+        this.airborne = true;
+        this.settleTimer = 90;
+        const dx=nearChip.x-this.x, dy=nearChip.y-this.y;
+        const d=Math.hypot(dx,dy)+0.001;
+        this.vx = (dx/d)*this.maxSpd*0.7 + rnd(-0.3,0.3);
+        this.vy = (dy/d)*this.maxSpd*0.7 + rnd(-0.3,0.3);
+      } else {
+        // Idle shuffle on sand
+        this.vx *= 0.72; this.vy *= 0.72;
+        this.vx += rnd(-0.018,0.018); this.vy += rnd(-0.018,0.018);
+        this.x += this.vx; this.y += this.vy;
+        this.x = clamp(this.x, 12, W-12);
+        this.y = clamp(this.y, 100, H-48);
+        this.wp += 0.025;
+        return;
+      }
+    }
+
+    // ═══════════════ AIRBORNE ══════════════════════════════
+    let fx=0, fy=0;
+
+    if (nearDog) {
+      // ── Strong flee from dog ─────────────────────────────
+      const dx=this.x-nearDog.dogX, dy=this.y-nearDog.dogY;
+      const d=Math.hypot(dx,dy)+0.001;
+      const str = 0.9*(1-nearDogDist/nearDog.r);
+      fx += (dx/d)*str;
+      fy += (dy/d)*str;
+      this.settleTimer = 200; // keep flying after a scare
+
+      // Light separation so they don't pile up
+      for (const o of gulls) {
+        if (o===this) continue;
+        const ddx=this.x-o.x, ddy=this.y-o.y;
+        const dd=Math.hypot(ddx,ddy)+0.001;
+        if (dd < 22) { fx+=ddx/dd*1.2; fy+=ddy/dd*1.2; }
+      }
+
+    } else if (nearChip && nearChipDist < 280) {
+      // ── CHIP OVERRIDE: ignore boid rules, go straight to chip ─
+      const dx=nearChip.x-this.x, dy=nearChip.y-this.y;
+      const d=Math.hypot(dx,dy)+0.001;
+      fx += (dx/d)*0.42;
+      fy += (dy/d)*0.42;
+      this.settleTimer = Math.max(this.settleTimer, 90); // reset while near chip
+
+      // Only separation so they don't stack on the chip
+      for (const o of gulls) {
+        if (o===this) continue;
+        const ddx=this.x-o.x, ddy=this.y-o.y;
+        const dd=Math.hypot(ddx,ddy)+0.001;
+        if (dd < 22) { fx+=ddx/dd*0.9; fy+=ddy/dd*0.9; }
+      }
+
+    } else if (nearChip && nearChipDist < 500) {
+      // ── Weaker chip pull at range + light boid ───────────
+      const dx=nearChip.x-this.x, dy=nearChip.y-this.y;
+      const d=Math.hypot(dx,dy)+0.001;
+      fx += (dx/d)*0.14;
+      fy += (dy/d)*0.14;
+      this.settleTimer = Math.max(this.settleTimer, 45);
+      // Light separation + alignment so flock travels together toward chip
+      let sx=0,sy=0,sc=0, ax=0,ay=0,ac=0;
+      for (const o of gulls) {
+        if (o===this || !o.airborne) continue;
+        const ddx=this.x-o.x, ddy=this.y-o.y;
+        const dd=Math.hypot(ddx,ddy)+0.001;
+        if (dd<26) { sx+=ddx/dd; sy+=ddy/dd; sc++; }
+        if (dd<62) { ax+=o.vx;   ay+=o.vy;   ac++; }
+      }
+      if (sc) { fx+=sx/sc*1.2; fy+=sy/sc*1.2; }
+      if (ac) { fx+=(ax/ac-this.vx)*0.06; fy+=(ay/ac-this.vy)*0.06; }
+
+    } else {
+      // ── No chip: boid + settle ───────────────────────────
+      this.settleTimer = Math.max(0, this.settleTimer-1);
+
+      let sx=0,sy=0,sc=0, ax=0,ay=0,ac=0, cx=0,cy=0,cc=0;
+      for (const o of gulls) {
+        if (o===this || !o.airborne) continue;
+        const dx=this.x-o.x, dy=this.y-o.y;
+        const d=Math.hypot(dx,dy)+0.001;
+        if (d<26) { sx+=dx/d; sy+=dy/d; sc++; }
+        if (d<62) { ax+=o.vx; ay+=o.vy; ac++; }
+        if (d<88) { cx+=o.x;  cy+=o.y;  cc++; }
+      }
+      if (sc) { fx+=sx/sc*1.8;            fy+=sy/sc*1.8; }
+      if (ac) { fx+=(ax/ac-this.vx)*0.09; fy+=(ay/ac-this.vy)*0.09; }
+      if (cc) { fx+=(cx/cc-this.x)*0.007; fy+=(cy/cc-this.y)*0.007; }
+
+      if (this.settleTimer <= 0) {
+        // Friction: slow down and drift back to visible area
+        this.vx *= 0.96; this.vy *= 0.96;
+        if (this.x < 35)   fx += 0.06;
+        if (this.x > W-35) fx -= 0.06;
+        if (this.y < 100)  fy += 0.06;
+        if (this.y > H-48) fy -= 0.06;
+        // Land when slow enough
+        if (Math.hypot(this.vx,this.vy) < 0.22) {
+          this.airborne = false;
+          this.vx=0; this.vy=0;
+          this.faceAng = -Math.PI/2;  // always face up when landing
+          this.x = clamp(this.x,12,W-12);
+          this.y = clamp(this.y,100,H-48);
+          return;
+        }
+      } else {
+        // Wander while still in settle window
+        fx += rnd(-0.07,0.07); fy += rnd(-0.07,0.07);
+      }
+    }
+
+    // ── Apply forces ──────────────────────────────────────
+    this.vx += fx; this.vy += fy;
+    const spd = Math.hypot(this.vx,this.vy);
+    if (spd > this.maxSpd)  { this.vx*=this.maxSpd/spd; this.vy*=this.maxSpd/spd; }
+    if (spd < 0.3 && hasChip) { this.vx+=rnd(-0.3,0.3); this.vy+=rnd(-0.3,0.3); }
+
+    this.x += this.vx; this.y += this.vy;
+    this.wp += 0.18;
+
+    // Left/right wrap, top/bottom soft bounce (no more disappearing into ocean or road)
+    if (this.x < -6)  this.x = W+6;
+    if (this.x > W+6) this.x = -6;
+    if (this.y < 0)   { this.y=0;  this.vy=Math.abs(this.vy)*0.5; }
+    if (this.y > H+6) { this.y=H+6; this.vy=-Math.abs(this.vy)*0.5; }
+  }
+
+  draw() {
+    const ang = this.airborne
+      ? Math.atan2(this.vy, this.vx)
+      : this.faceAng;
+    const s  = this.sz;
+    const wb = Math.sin(this.wp) * (this.airborne ? 0.28 : 0.06);
+
+    ctx.save();
+    ctx.translate(this.x, this.y);
+    ctx.rotate(ang + Math.PI/2);
+
+    if (!this.airborne) {
+      // Ground shadow when resting
+      ctx.fillStyle = 'rgba(0,0,0,0.18)';
+      ctx.beginPath();
+      ctx.ellipse(1, s*0.6, s*1.1, s*0.25, 0, 0, Math.PI*2);
+      ctx.fill();
+    }
+
+    ctx.shadowBlur    = this.airborne ? 5 : 2;
+    ctx.shadowColor   = 'rgba(0,0,0,0.2)';
+    ctx.shadowOffsetY = this.airborne ? 1.5 : 0.5;
+
+    if (this.airborne) {
+      // Flying: extended wings
+      ctx.fillStyle = '#f0f0f0';
+      ctx.beginPath();
+      ctx.ellipse(0,0, s*0.37, s*0.72, 0,0, Math.PI*2);
+      ctx.fill();
+      ctx.fillStyle = '#e4e4e4';
+      const lw = s*(1.12+wb);
+      ctx.beginPath();
+      ctx.moveTo(-s*0.22,-s*0.1);
+      ctx.quadraticCurveTo(-lw,-s*0.44,-lw*0.65,s*0.5);
+      ctx.lineTo(-s*0.22,s*0.28); ctx.closePath(); ctx.fill();
+      const rw = s*(1.12-wb);
+      ctx.beginPath();
+      ctx.moveTo(s*0.22,-s*0.1);
+      ctx.quadraticCurveTo(rw,-s*0.44,rw*0.65,s*0.5);
+      ctx.lineTo(s*0.22,s*0.28); ctx.closePath(); ctx.fill();
+    } else {
+      // Resting: plump body, wings tucked
+      ctx.fillStyle = '#e8e8e8';
+      ctx.beginPath();
+      ctx.ellipse(0,0, s*0.46, s*0.58, 0,0, Math.PI*2);
+      ctx.fill();
+      ctx.fillStyle = '#d8d8d8';
+      const fw = s*(0.58+wb);
+      ctx.beginPath();
+      ctx.moveTo(-s*0.32,-s*0.08);
+      ctx.quadraticCurveTo(-fw,s*0.08,-fw*0.8,s*0.46);
+      ctx.lineTo(-s*0.32,s*0.38); ctx.closePath(); ctx.fill();
+      ctx.beginPath();
+      ctx.moveTo(s*0.32,-s*0.08);
+      ctx.quadraticCurveTo(fw,s*0.08,fw*0.8,s*0.46);
+      ctx.lineTo(s*0.32,s*0.38); ctx.closePath(); ctx.fill();
+    }
+
+    ctx.shadowBlur=0; ctx.shadowOffsetY=0;
+
+    ctx.fillStyle = '#f0a020';
+    ctx.beginPath();
+    ctx.moveTo(-2.2,-s*0.68); ctx.lineTo(2.2,-s*0.68); ctx.lineTo(0,-s*1.04);
+    ctx.closePath(); ctx.fill();
+
+    ctx.fillStyle = '#111';
+    ctx.beginPath(); ctx.arc(s*0.1,-s*0.2,1.4,0,Math.PI*2); ctx.fill();
+
+    ctx.restore();
+  }
+}
+
+// ── NPC ────────────────────────────────────────────────────
+const NPC_COLS = ['#e74c3c','#3498db','#2ecc71','#f39c12','#9b59b6','#1abc9c','#e67e22','#e91e63'];
+
+class NPC {
+  constructor() {
+    this.col       = NPC_COLS[Math.floor(rnd(0,NPC_COLS.length))];
+    this.sz        = rnd(9,13);
+    this.panic     = 0;
+    this.wt        = rnd(0,150);
+    this.x         = rnd(60,W-60);
+    this.y         = rnd(115,H-55);
+    this.tx        = this.x; this.ty = this.y;
+    this.leaving   = false;
+    this.stayTimer = rnd(1800, 5000);
+    this.stunTimer = 0;   // freeze frames on first gull contact before fleeing
+  }
+
+  update() {
+    // ── Stay timer: voluntary departure ─────────────────
+    if (!this.leaving && this.panic <= 0) {
+      this.stayTimer--;
+      if (this.stayTimer <= 0) {
+        this.leaving = true;
+        this.leavingTimer = 0;
+        // Walk to nearest edge (edge-aware: target is 100px past closest boundary)
+        const exits = [
+          {dx:0,  dy:1,  t:(H+100-this.y)},   // bottom
+          {dx:-1, dy:0,  t:(this.x+100)},       // left
+          {dx:1,  dy:0,  t:(W+100-this.x)},     // right
+        ];
+        const best = exits.reduce((a,b)=>a.t<b.t?a:b);
+        this.tx = this.x + best.dx*best.t;
+        this.ty = this.y + best.dy*best.t;
+      }
+    }
+
+    // ── Wander target ────────────────────────────────────
+    this.wt--;
+    if (this.wt<=0 && this.panic<=0 && !this.leaving) {
+      this.wt=rnd(80,160); this.tx=rnd(60,W-60); this.ty=rnd(115,H-55);
+    }
+
+    // ── Gull detection (airborne only) ───────────────────
+    let nd=Infinity, ng=null, nearbyAirborne=0;
+    for (const g of gulls) {
+      if (!g.airborne) continue;
+      const d=Math.hypot(g.x-this.x, g.y-this.y);
+      if (d<nd) { nd=d; ng=g; }
+      if (d<65) nearbyAirborne++;
+    }
+
+    const mult = nearbyAirborne>=10 ? 4.0
+               : nearbyAirborne>= 5 ? 2.5
+               : nearbyAirborne>= 3 ? 1.5
+               : 1.0;
+
+    if (nd<55 && ng && !this.leaving) {
+      score       += 0.025*mult*scoreMultiplier;
+      growthMeter += 0.025*mult;
+      if (Math.random()<0.018) particles.push(new Particle(this.x, this.y-this.sz*1.5, mult));
+
+      const wasCalm = (this.panic===0);
+      this.panic = 65;
+      if (wasCalm) this.stunTimer=22;
+
+      if (this.stunTimer>0) {
+        this.stunTimer--;
+        // Frozen during stun — shake in place
+      } else {
+        // Post-stun: flee on-screen so NPCs stay chaseable/steerable
+        // (allows future mechanic of herding NPCs into traffic)
+        const dx=this.x-ng.x, dy=this.y-ng.y, d=Math.hypot(dx,dy)+0.001;
+        const fleeX=this.x+(dx/d)*180, fleeY=this.y+(dy/d)*180;
+        const nearEdge=this.x<80||this.x>W-80||this.y<150||this.y>H-70;
+        if (nearEdge && (fleeX<20||fleeX>W-20||fleeY<88||fleeY>H-10)) {
+          // At edge AND fleeing toward it — exit the screen
+          this.leaving=true;
+          this.leavingTimer=0;
+          // Edge-aware overshoot: travel to 100px past the nearest canvas boundary
+          const ndx=dx/d, ndy=dy/d;
+          const exits=[];
+          if(ndx> 0.001) exits.push((W+100-this.x)/ndx);
+          if(ndx<-0.001) exits.push((-100-this.x)/ndx);
+          if(ndy> 0.001) exits.push((H+100-this.y)/ndy);
+          if(ndy<-0.001) exits.push((-100-this.y)/ndy);
+          const dist = exits.length ? Math.min(...exits.filter(t=>t>0)) : 800;
+          this.tx=this.x+ndx*dist;
+          this.ty=this.y+ndy*dist;
+        } else {
+          // Mid-beach: bounce around toward safety, update each frame (chaseable)
+          this.tx=clamp(fleeX,40,W-40);
+          this.ty=clamp(fleeY,100,H-55);
+        }
+      }
+    } else if (this.panic>0) {
+      this.panic--;
+      if (this.stunTimer>0) this.stunTimer--;
+      if (this.panic===0) this.stunTimer=0;
+    }
+
+    // ── Social contagion ─────────────────────────────────
+    if (this.panic<=0 && !this.leaving) {
+      for (const other of npcs) {
+        if (other===this || other.panic<=30) continue;
+        if (Math.hypot(other.x-this.x,other.y-this.y)<52 && Math.random()<0.004) {
+          this.panic=28;
+          this.tx=clamp(this.x+rnd(-120,120),30,W-30);
+          this.ty=clamp(this.y+rnd(-60,60),95,H-30);
+        }
+      }
+    }
+
+    // ── Movement ─────────────────────────────────────────
+    const dx=this.tx-this.x, dy=this.ty-this.y, dd=Math.hypot(dx,dy);
+    if (this.leaving) {
+      this.leavingTimer=(this.leavingTimer||0)+1;
+      const spd=4.0;
+      if (dd>2) { this.x+=(dx/dd)*spd; this.y+=(dy/dd)*spd; }
+      if (this.x<-60||this.x>W+60||this.y<-60||this.y>H+60||this.leavingTimer>500)
+        return false;
+    } else {
+      const spd=this.panic>0 ? 2.8 : 0.8;
+      if (dd>3) { this.x+=(dx/dd)*spd; this.y+=(dy/dd)*spd; }
+      // Soft avoidance: NPCs feel uncomfortable near road (H_STAGE2) and harbor (H_STAGE3)
+      if (this.y > H_STAGE2-60 && !this.panic) {
+        this.ty = Math.min(this.ty, H_STAGE2-80);  // nudge target back onto promenade
+        this.y -= 0.35;
+      }
+      if (this.y > H_STAGE3-40) this.y -= 0.8;   // hard push away from harbor edge
+      this.x=clamp(this.x,30,W-30); this.y=clamp(this.y,95,H-30);
+    }
+
+    return true;
+  }
+
+  draw() {
+    ctx.save();
+    ctx.translate(this.x,this.y);
+    if (this.panic>40) ctx.translate(rnd(-1.5,1.5),rnd(-1.5,1.5));
+    const s=this.sz;
+    ctx.fillStyle='rgba(0,0,0,0.11)';
+    ctx.beginPath(); ctx.ellipse(0,s*0.62,s*0.65,s*0.18,0,0,Math.PI*2); ctx.fill();
+    ctx.fillStyle=this.col;
+    ctx.beginPath(); ctx.ellipse(0,0,s*0.48,s*0.68,0,0,Math.PI*2); ctx.fill();
+    ctx.fillStyle='#f5cba7';
+    ctx.beginPath(); ctx.arc(0,-s*0.88,s*0.36,0,Math.PI*2); ctx.fill();
+    if (this.panic>40) {
+      ctx.font=Math.floor(s*1.1)+'px sans-serif';
+      ctx.textAlign='center'; ctx.fillText('😱',0,-s*1.7);
+    }
+    ctx.restore();
+  }
+}
+
+// ── SPAWN NPC from edge ────────────────────────────────────
+function spawnNPC() {
+  const n    = new NPC();
+  // NPCs only belong on beach + promenade — road/sidewalk is police territory
+  const maxY = stage>=2 ? H_STAGE2-55 : H_BASE-55;
+  const side = Math.floor(rnd(0,3));
+  if      (side===0) { n.x=-18;          n.y=rnd(115,maxY); }
+  else if (side===1) { n.x=W+18;         n.y=rnd(115,maxY); }
+  else               { n.x=rnd(40,W-40); n.y=H_BASE+18;     }  // bottom entry = promenade top
+  n.tx=rnd(100,W-100);
+  n.ty=rnd(130,maxY-20);
+  n.stayTimer=rnd(1800,5000);
+  npcs.push(n);
+}
+
+// ── DOG WALKER ─────────────────────────────────────────────
+// Owner walks a straight path from one edge to the opposite.
+// Dog detects nearby gulls and pulls the owner toward them.
+// Player can use chips to lure gulls OUT of the dog's path —
+// which paradoxically pulls the dog (and owner) toward the exit faster.
+class DogWalker {
+  constructor() {
+    const horiz = Math.random() < 0.62;
+    if (horiz) {
+      const fromLeft = Math.random() < 0.5;
+      this.x     = fromLeft ? -32 : W+32;
+      this.y     = rnd(115, H_BASE-60);
+      this.exitX = fromLeft ? W+220 : -220;
+      this.exitY = rnd(115, H_BASE-60);
+    } else {
+      this.x     = rnd(50, W-50);
+      this.y     = H_BASE+32;
+      this.exitX = rnd(50, W-50);
+      this.exitY = -220;
+    }
+    this.spd   = rnd(0.9, 1.5);
+    this.r     = DIFF[difficulty].dogR + rnd(-12,12);
+    this.baseR = this.r;
+    this.alive = true;
+    this.dogX  = this.x;
+    this.dogY  = this.y;
+    this.leashAng  = 0;
+    this.neutralized   = false;  // true after eating a chip
+    this.neutralEmoji  = 0;      // countdown for 😋 display
+  }
+
+  update() {
+    const edx = this.exitX - this.x;
+    const edy = this.exitY - this.y;
+    const ed  = Math.hypot(edx, edy) + 0.001;
+
+    // ── Chip eating: neutralises the dog ─────────────────
+    if (!this.neutralized) {
+      for (const chip of chips) {
+        if (chip.life <= 20) continue;
+        if (Math.hypot(chip.x-this.dogX, chip.y-this.dogY) < 38) {
+          chip.life = 0;          // eaten!
+          this.neutralized = true;
+          this.neutralEmoji = 200;
+          this.r = 0;             // scare radius gone
+          // Crumb burst
+          for (let i=0;i<5;i++){
+            const p=new Particle(this.dogX+rnd(-12,12),this.dogY+rnd(-8,8),1);
+            p.text=['😋','🦴','✦'][Math.floor(rnd(0,3))];
+            p.col='#fdcb6e';
+            particles.push(p);
+          }
+          break;
+        }
+      }
+    }
+    if (this.neutralEmoji>0) this.neutralEmoji--;
+
+    // ── Dog pull (skip gulls closer than 18px to owner — prevents spaz) ─
+    let pullX=0, pullY=0, nearDist=Infinity;
+    if (!this.neutralized) {
+      for (const g of gulls) {
+        const d = Math.hypot(g.x-this.x, g.y-this.y);
+        if (d < 18) continue;   // too close → skip (zero-vector source of spaz)
+        if (d < 210 && d < nearDist) {
+          nearDist = d;
+          pullX = g.x - this.x;
+          pullY = g.y - this.y;
+        }
+      }
+    }
+    const hasPull = !this.neutralized && nearDist < 210;
+    const pullD   = Math.hypot(pullX, pullY) + 0.001;
+    const pullStr = hasPull ? 0.55*(1-nearDist/210) : 0;
+
+    // ── Owner movement ────────────────────────────────────
+    let mvx = edx/ed + (hasPull ? (pullX/pullD)*pullStr : 0);
+    let mvy = edy/ed + (hasPull ? (pullY/pullD)*pullStr : 0);
+    const mvd = Math.hypot(mvx, mvy) + 0.001;
+    this.x += (mvx/mvd) * this.spd;
+    this.y += (mvy/mvd) * this.spd;
+
+    // ── Dog position: lerp toward target (smooth, no spaz) ─
+    const leashLen = 40;
+    const targetDogX = this.x + (hasPull ? (pullX/pullD) : (mvx/mvd)) * leashLen;
+    const targetDogY = this.y + (hasPull ? (pullY/pullD) : (mvy/mvd)) * leashLen;
+    this.dogX += (targetDogX - this.dogX) * 0.14;  // lerp — smooth tracking
+    this.dogY += (targetDogY - this.dogY) * 0.14;
+    this.leashAng = Math.atan2(this.dogY-this.y, this.dogX-this.x);
+
+    if (this.x<-55||this.x>W+55||this.y<-55||this.y>H+55) this.alive=false;
+  }
+
+  draw() {
+    ctx.save();
+
+    // Scare radius — hidden when neutralized
+    if (!this.neutralized) {
+      const cx=(this.x+this.dogX)*0.5, cy=(this.y+this.dogY)*0.5;
+      ctx.beginPath(); ctx.arc(cx,cy,this.r,0,Math.PI*2);
+      ctx.fillStyle='rgba(101,67,33,0.06)'; ctx.fill();
+      ctx.strokeStyle='rgba(101,67,33,0.25)'; ctx.lineWidth=1.5;
+      ctx.setLineDash([5,5]); ctx.stroke(); ctx.setLineDash([]);
+    }
+
+    // Leash
+    ctx.strokeStyle='#777'; ctx.lineWidth=1.2;
+    ctx.beginPath(); ctx.moveTo(this.x,this.y); ctx.lineTo(this.dogX,this.dogY); ctx.stroke();
+
+    // Owner
+    ctx.fillStyle='#2d3436';
+    ctx.beginPath(); ctx.ellipse(this.x,this.y,7,10,0,0,Math.PI*2); ctx.fill();
+    ctx.fillStyle='#f5cba7';
+    ctx.beginPath(); ctx.arc(this.x,this.y-13,6,0,Math.PI*2); ctx.fill();
+
+    // Dog body
+    ctx.save();
+    ctx.translate(this.dogX, this.dogY);
+    ctx.rotate(this.leashAng);
+    ctx.fillStyle = this.neutralized ? '#a0785a' : '#8B4513';  // duller when satisfied
+    ctx.beginPath(); ctx.ellipse(0,0,10,6,0,0,Math.PI*2); ctx.fill();
+    ctx.fillStyle = this.neutralized ? '#8a6040' : '#7a3b12';
+    ctx.beginPath(); ctx.arc(10,0,5,0,Math.PI*2); ctx.fill();
+    ctx.strokeStyle = this.neutralized ? '#a0785a' : '#8B4513'; ctx.lineWidth=2;
+    ctx.beginPath(); ctx.moveTo(-9,0); ctx.lineTo(-14,-5); ctx.stroke();
+    ctx.restore();
+
+    // Labels — only show satisfied emoji, no DOG! text
+    ctx.font='bold 9px Nunito'; ctx.textAlign='center';
+    if (this.neutralEmoji>0) {
+      ctx.globalAlpha=Math.min(1,this.neutralEmoji/30);
+      ctx.font='16px sans-serif';
+      ctx.fillText('😋', this.dogX, this.dogY-18);
+      ctx.globalAlpha=1;
+    }
+
+    ctx.restore();
+  }
+}
+
+// ── CHIP ───────────────────────────────────────────────────
+class Chip {
+  constructor(x,y) { this.x=x; this.y=y; this.life=310; this.t=0; }
+  update() { this.life--; this.t+=0.15; return this.life>0; }
+  draw() {
+    const alpha=Math.min(1,this.life/40);
+    ctx.save(); ctx.globalAlpha=alpha; ctx.translate(this.x,this.y);
+    ctx.beginPath(); ctx.arc(0,0,175,0,Math.PI*2);
+    ctx.fillStyle='rgba(255,215,50,0.04)'; ctx.fill();
+    ctx.strokeStyle='rgba(255,215,50,0.13)'; ctx.lineWidth=1; ctx.stroke();
+    [[-4,-2,0.3],[-1,0,0],[3,2,-0.25]].forEach(([ox,oy,rot],i)=>{
+      ctx.save(); ctx.translate(ox,oy); ctx.rotate(rot);
+      ctx.fillStyle=i%2===0?'#f5a623':'#fdd835';
+      ctx.shadowBlur=7; ctx.shadowColor='rgba(255,200,0,0.55)';
+      ctx.beginPath(); rrPath(-6,-3.5,14,8,2); ctx.fill();
+      ctx.restore();
+    });
+    ctx.shadowBlur=0;
+    for(let i=0;i<3;i++){
+      const a=this.t+i*Math.PI*2/3, r=13+Math.sin(this.t*2+i)*3.5;
+      ctx.fillStyle='rgba(255,255,140,0.8)';
+      ctx.beginPath(); ctx.arc(Math.cos(a)*r,Math.sin(a)*r,1.8,0,Math.PI*2); ctx.fill();
+    }
+    ctx.restore();
+  }
+}
+
+// ── PARTICLE ───────────────────────────────────────────────
+const PANIC_TEXTS = ['!','?!','!!','✦','~'];
+class Particle {
+  constructor(x, y, mult=1) {
+    this.x=x; this.y=y;
+    this.vx=rnd(-2,2); this.vy=rnd(-3,-1);
+    this.life=1; this.dec=rnd(0.018,0.03);
+    this.sz=rnd(10,14) + (mult-1)*3;  // bigger for larger flocks
+    this.text = mult>=3 ? ['💥','🌊','!!!'][Math.floor(rnd(0,3))]
+                        : PANIC_TEXTS[Math.floor(rnd(0,PANIC_TEXTS.length))];
+    this.col=['#e74c3c','#f39c12','#fdcb6e','#e17055'][Math.floor(rnd(0,4))];
+  }
+  update() {
+    this.x+=this.vx; this.y+=this.vy; this.vy+=0.05;
+    this.life-=this.dec; return this.life>0;
+  }
+  draw() {
+    ctx.save(); ctx.globalAlpha=Math.max(0,this.life);
+    ctx.fillStyle=this.col; ctx.font='bold '+this.sz+'px Nunito';
+    ctx.textAlign='center'; ctx.fillText(this.text,this.x,this.y);
+    ctx.restore();
+  }
+}
+
+// ── CYCLIST ────────────────────────────────────────────────
+// Fast promenade crossers. Don't scatter gulls. Swerve wildly when swarmed.
+class Cyclist {
+  constructor() {
+    this.fromLeft = Math.random() < 0.5;
+    this.x  = this.fromLeft ? -25 : W+25;
+    this.y  = rnd(H_BASE+28, H_STAGE2-25);  // promenade zone only, never road
+    this.spd  = rnd(2.6, 4.0);
+    this.wobble = 0; this.wobbleV = 0;
+    this.alive  = true;
+    this.col  = NPC_COLS[Math.floor(rnd(0,NPC_COLS.length))];
+  }
+  update() {
+    this.x += this.fromLeft ? this.spd : -this.spd;
+    this.wobbleV += rnd(-0.04,0.04);
+    this.wobbleV *= 0.85;
+    this.wobble  += this.wobbleV;
+    this.wobble  *= 0.88;
+
+    // Nearby airborne gulls cause swerve + score
+    let nearby=0, nd=Infinity;
+    for (const g of gulls) {
+      if (!g.airborne) continue;
+      const d=Math.hypot(g.x-this.x, g.y-this.y);
+      if (d<nd) nd=d;
+      if (d<55) nearby++;
+    }
+    const mult = nearby>=5?2.5 : nearby>=3?1.5 : 1.0;
+    if (nd<52) {
+      this.wobbleV += rnd(-1.8,1.8);
+      score       += 0.15*mult*scoreMultiplier;   // 1.5× base vs regular NPCs — harder to catch
+      growthMeter += 0.15*mult;
+      if (Math.random()<0.016) particles.push(new Particle(this.x, this.y-18, mult));
+    }
+    this.y = clamp(this.y+this.wobble*0.35, H_BASE+22, H_STAGE2-20);
+    if (this.x<-65 || this.x>W+65) this.alive=false;
+  }
+  draw() {
+    ctx.save();
+    ctx.translate(this.x, this.y+this.wobble);
+    if (!this.fromLeft) ctx.scale(-1,1);
+    // Wheels
+    ctx.strokeStyle='#444'; ctx.lineWidth=2;
+    ctx.beginPath(); ctx.arc(-11,5,7,0,Math.PI*2); ctx.stroke();
+    ctx.beginPath(); ctx.arc(11,5,7,0,Math.PI*2);  ctx.stroke();
+    // Frame
+    ctx.strokeStyle='#e74c3c'; ctx.lineWidth=2.5;
+    ctx.beginPath();
+    ctx.moveTo(-11,5); ctx.lineTo(2,-4); ctx.lineTo(11,5);
+    ctx.moveTo(2,-4);  ctx.lineTo(3,-10);
+    ctx.moveTo(-4,-4); ctx.lineTo(3,-10);
+    ctx.stroke();
+    // Handlebar
+    ctx.strokeStyle='#666'; ctx.lineWidth=1.5;
+    ctx.beginPath(); ctx.moveTo(9,-2); ctx.lineTo(14,0); ctx.stroke();
+    // Rider body (leaning forward)
+    ctx.save(); ctx.translate(2,-9); ctx.rotate(0.35);
+    ctx.fillStyle=this.col;
+    ctx.beginPath(); ctx.ellipse(0,0,4,7,0,0,Math.PI*2); ctx.fill();
+    ctx.restore();
+    // Head + helmet
+    ctx.fillStyle='#f5cba7';
+    ctx.beginPath(); ctx.arc(8,-14,4.5,0,Math.PI*2); ctx.fill();
+    ctx.fillStyle=this.col;
+    ctx.beginPath(); ctx.arc(8,-18,4.5,Math.PI,Math.PI*2); ctx.fill();
+    ctx.restore();
+  }
+}
+
+// ── FOOD DROP ──────────────────────────────────────────────
+// Left behind when a Diner is scared. First gull to reach it
+// returns one chip charge instantly.
+class FoodDrop {
+  constructor(x,y) { this.x=x; this.y=y; this.life=480; this.t=0; }
+  update() {
+    this.life--; this.t+=0.1;
+    // Check for any airborne gull arriving
+    for (const g of gulls) {
+      if (g.airborne && Math.hypot(g.x-this.x,g.y-this.y)<30) {
+        chipCharges=Math.min(CHIP_MAX, chipCharges+1);
+        for(let i=0;i<8;i++){
+          const p=new Particle(this.x+rnd(-16,16),this.y+rnd(-10,10),1.5);
+          p.text=['✦','★','·'][Math.floor(rnd(0,3))];
+          p.col='#fdcb6e'; particles.push(p);
+        }
+        return false; // consumed
+      }
+    }
+    return this.life>0;
+  }
+  draw() {
+    ctx.save();
+    ctx.globalAlpha=Math.min(1,this.life/40);
+    ctx.translate(this.x,this.y);
+    ctx.shadowBlur=10+Math.sin(this.t)*4; ctx.shadowColor='rgba(255,200,0,0.7)';
+    ctx.font='15px sans-serif'; ctx.textAlign='center';
+    ctx.fillText('🍟',0,5);
+    ctx.shadowBlur=0;
+    ctx.fillStyle='rgba(255,215,50,0.85)';
+    ctx.font='bold 8px Nunito'; ctx.textAlign='center';
+    ctx.fillText('+CHIP',0,-9);
+    ctx.restore();
+  }
+}
+
+// ── DINER ──────────────────────────────────────────────────
+// Seated at promenade restaurant tables. Drop food when scared.
+// Table positions match the storefront drawing in drawStorefronts().
+const DINER_SEATS = [
+  {x:130, y:H_STAGE2-83},   // pizza table
+  {x:420, y:H_STAGE2-83},   // cafe table
+  {x:690, y:H_STAGE2-83},   // gelato table
+];
+
+class Diner {
+  constructor(seat) {
+    this.x   = seat.x + rnd(-10,10);
+    this.y   = seat.y + rnd(-3,3);
+    this.col = NPC_COLS[Math.floor(rnd(0,NPC_COLS.length))];
+    this.sz  = rnd(8,11);
+    this.panic   = 0;
+    this.scared  = false;  // has already dropped food
+    this.leaving = false;
+    this.vy      = 0;
+  }
+  update() {
+    if (this.leaving) {
+      this.vy += 0.15; this.y += this.vy;
+      if (this.panic>0) this.panic--;
+      if (this.y>H+55) return false;  // off screen
+      return true;
+    }
+    if (this.scared) return true;
+
+    // Gull detection
+    let nd=Infinity, ng=null, nearbyAirborne=0;
+    for (const g of gulls) {
+      if (!g.airborne) continue;
+      const d=Math.hypot(g.x-this.x,g.y-this.y);
+      if (d<nd){nd=d;ng=g;}
+      if (d<65) nearbyAirborne++;
+    }
+    const mult=nearbyAirborne>=10?4.0:nearbyAirborne>=5?2.5:nearbyAirborne>=3?1.5:1.0;
+
+    if (nd<55 && ng) {
+      this.scared=true; this.leaving=true; this.panic=65;
+      foodDrops.push(new FoodDrop(this.x, this.y));
+      score       += 0.35*mult*scoreMultiplier;
+      growthMeter += 0.35*mult;
+      for(let i=0;i<4;i++) particles.push(new Particle(this.x+rnd(-12,12),this.y-this.sz,mult));
+    } else if (this.panic>0) { this.panic--; }
+    return true;
+  }
+  draw() {
+    ctx.save();
+    ctx.translate(this.x,this.y);
+    if (this.panic>30) ctx.translate(rnd(-1,1),rnd(-1,1));
+    const s=this.sz;
+    // Shadow
+    ctx.fillStyle='rgba(0,0,0,0.1)';
+    ctx.beginPath(); ctx.ellipse(0,s*0.5,s*0.5,s*0.14,0,0,Math.PI*2); ctx.fill();
+    // Body (seated — shorter)
+    ctx.fillStyle=this.col;
+    ctx.beginPath(); ctx.ellipse(0,0,s*0.4,s*0.52,0,0,Math.PI*2); ctx.fill();
+    // Head
+    ctx.fillStyle='#f5cba7';
+    ctx.beginPath(); ctx.arc(0,-s*0.72,s*0.3,0,Math.PI*2); ctx.fill();
+    if (this.panic>30){
+      ctx.font=Math.floor(s*0.9)+'px sans-serif';
+      ctx.textAlign='center'; ctx.fillText('😱',0,-s*1.45);
+    }
+    ctx.restore();
+  }
+}
+
+// ── CAR ────────────────────────────────────────────────────
+// Crosses the road zone (stage 3). Removes any gull it hits.
+// Two lanes: upper goes left→right, lower goes right→left.
+class Car {
+  constructor() {
+    this.fromLeft = Math.random() < 0.5;
+    const lane = Math.random() < 0.5 ? 0 : 1;
+    this.fromLeft = lane===0; // lane 0 = left→right, lane 1 = right→left
+    this.x   = this.fromLeft ? -40 : W+40;
+    this.y   = H_STAGE2+32 + lane*58 + rnd(-6,6);
+    const [cmin,cmax]=DIFF[difficulty].carSpd;
+    this.spd = rnd(cmin, cmax);
+    this.w   = 38; this.h = 19;
+    this.col = ['#e74c3c','#3498db','#2ecc71','#f39c12','#9b59b6','#e67e22','#1abc9c','#fff'][Math.floor(rnd(0,8))];
+    this.alive   = true;
+    this.crashed = false;   // true after hitting an NPC
+    this.crashAngle = 0;
+    this.wreckLife  = 0;
+  }
+  update() {
+    // Crashed wreck — smoke, then despawn
+    if (this.crashed) {
+      this.wreckLife--;
+      if (this.wreckLife<=0) this.alive=false;
+      return;
+    }
+
+    this.x += this.fromLeft ? this.spd : -this.spd;
+
+    // NPC crash: any NPC in road zone hits the car → crash + big score
+    for (let i=npcs.length-1; i>=0; i--) {
+      const n=npcs[i];
+      if (n.y>H_STAGE2 && n.y<H_STAGE3 &&
+          Math.abs(n.x-this.x)<this.w && Math.abs(n.y-this.y)<this.h*1.8) {
+        this.crashed=true; this.wreckLife=2400; this.crashAngle=rnd(-0.35,0.35);
+        npcs.splice(i,1);
+        const crashGain=150*scoreMultiplier;
+        score+=crashGain; growthMeter+=25;
+        scorePopup(this.x, this.y-20, crashGain, '#e74c3c');
+        playCarCrash();
+        runCarCrashes++;
+        if(runCarCrashes>=10) unlockAch('road_rage');
+        addScorchMark(this.x, this.y);
+        for(let j=0;j<10;j++){
+          const p=new Particle(this.x+rnd(-22,22),this.y+rnd(-14,14),3);
+          p.text=['💥','🔥','!!!','💢'][Math.floor(rnd(0,4))];
+          p.col='#e74c3c'; p.sz=rnd(14,22); p.dec=0.008; particles.push(p);
+        }
+        return; // stop all other processing this frame
+      }
+    }
+
+    // Kill gulls in path — y-gate skips gulls not near road, cap at 5/frame
+    let kills=0;
+    for (let i=gulls.length-1; i>=0 && kills<5; i--) {
+      const g=gulls[i];
+      if (g.y < H_STAGE2-10 || g.y > H_STAGE3+10) continue; // not in road zone, skip
+      if (Math.abs(g.x-this.x)<this.w*0.65 && Math.abs(g.y-this.y)<this.h*0.85) {
+        gulls.splice(i,1); kills++;
+        statGullsKilled++;
+      }
+    }
+    if (kills>0 && Math.random()<0.75) {
+      const p=new Particle(this.x+rnd(-8,8),this.y+rnd(-6,6),1);
+      p.text='🪶'; p.col='#e8e8e8';
+      p.vx=(this.fromLeft?-1:1)*rnd(1,2.5)+rnd(-0.5,0.5);
+      p.vy=rnd(-1.5,0.5); p.dec=0.06; particles.push(p);
+    }
+    if (this.x<-80||this.x>W+80) this.alive=false;
+  }
+  draw() {
+    if (this.crashed) {
+      ctx.save(); ctx.translate(this.x,this.y); ctx.rotate(this.crashAngle);
+      if (!this.fromLeft) ctx.scale(-1,1);
+      // Original car shape but charred
+      ctx.fillStyle='#2a2a2a';
+      ctx.beginPath(); rrPath(-this.w/2,-this.h/2,this.w,this.h,4); ctx.fill();
+      ctx.fillStyle='rgba(255,60,0,0.35)'; // orange char
+      ctx.beginPath(); rrPath(-this.w/2,-this.h/2,this.w,this.h,4); ctx.fill();
+      // Roof
+      ctx.fillStyle='rgba(0,0,0,0.5)';
+      ctx.beginPath(); rrPath(-this.w/2+7,-this.h/2,this.w-14,this.h*0.72,3); ctx.fill();
+      // Broken windshield
+      ctx.strokeStyle='rgba(255,255,255,0.2)'; ctx.lineWidth=1;
+      ctx.beginPath(); ctx.moveTo(this.w/2-15,-this.h/2+2); ctx.lineTo(this.w/2-5,this.h/2-2); ctx.stroke();
+      // Wheels (still there)
+      ctx.fillStyle='#111';
+      for(const [wx,wy] of [[-this.w/2+6,-this.h/2-2],[this.w/2-6,-this.h/2-2],
+                             [-this.w/2+6,this.h/2+1],[this.w/2-6,this.h/2+1]]){
+        ctx.beginPath(); ctx.arc(wx,wy,4.5,0,Math.PI*2); ctx.fill();
+      }
+      ctx.restore();
+      // Fire above (in screen space so it's always visible)
+      ctx.font='12px sans-serif'; ctx.textAlign='center';
+      ctx.fillText('🔥',this.x,this.y-this.h/2-4);
+      return;
+    }
+    ctx.save();
+    ctx.translate(this.x,this.y);
+    if (!this.fromLeft) ctx.scale(-1,1);
+    ctx.shadowBlur=8; ctx.shadowColor='rgba(0,0,0,0.5)';
+    // Body
+    ctx.fillStyle=this.col;
+    ctx.beginPath(); rrPath(-this.w/2,-this.h/2,this.w,this.h,4); ctx.fill();
+    // Roof
+    ctx.fillStyle='rgba(0,0,0,0.22)';
+    ctx.beginPath(); rrPath(-this.w/2+7,-this.h/2,this.w-14,this.h*0.72,3); ctx.fill();
+    ctx.shadowBlur=0;
+    // Windshield
+    ctx.fillStyle='rgba(173,216,230,0.55)';
+    ctx.beginPath(); rrPath(this.w/2-15,-this.h/2+2,11,this.h*0.62,2); ctx.fill();
+    // Wheels
+    ctx.fillStyle='#111';
+    for(const [wx,wy] of [[-this.w/2+6,-this.h/2-2],[this.w/2-6,-this.h/2-2],
+                           [-this.w/2+6,this.h/2+1],[this.w/2-6,this.h/2+1]]){
+      ctx.beginPath(); ctx.arc(wx,wy,4.5,0,Math.PI*2); ctx.fill();
+    }
+    ctx.restore();
+  }
+}
+
+// ── POLICE ─────────────────────────────────────────────────
+// Patrols the far sidewalk in stage 3.
+// While gulls are within radio radius: timer drains at 1.5× speed,
+// HUD timer turns orange.
+// Overwhelm with 20+ gulls: police flees, +10s bonus.
+class Police {
+  constructor() {
+    const fromRight = Math.random()<0.5;
+    this.x = fromRight ? W+20 : -20;
+    this.y = rnd(H_BASE+30, H_STAGE2-40);   // promenade zone
+    this.tx = rnd(80,W-80); this.ty = rnd(H_BASE+30, H_STAGE2-40);
+    this.spd = rnd(0.7,1.1);
+    this.wt  = 0;
+    this.r   = 88;
+    this.radioing     = false;
+    this.overwhelmed  = false;
+    this.alive        = true;
+  }
+  update() {
+    if (!this.overwhelmed) {
+      // Wander in promenade zone
+      this.wt--;
+      if (this.wt<=0) {
+        this.wt=rnd(90,200)|0;
+        this.tx=rnd(60,W-60);
+        this.ty=rnd(H_BASE+30, H_STAGE2-40);
+      }
+      const dx=this.tx-this.x, dy=this.ty-this.y, dd=Math.hypot(dx,dy);
+      if (dd>3) { this.x+=(dx/dd)*this.spd; this.y+=(dy/dd)*this.spd; }
+      this.x=clamp(this.x,18,W-18);
+      this.y=clamp(this.y,H_BASE+25,H_STAGE2-35);
+    } else {
+      // Overwhelmed: flee straight to exit, don't wander
+      const dx=this.tx-this.x, dy=this.ty-this.y, dd=Math.hypot(dx,dy)+0.001;
+      this.x+=(dx/dd)*this.spd; this.y+=(dy/dd)*this.spd;
+      if(this.x<-65||this.x>W+65||this.y<-65||this.y>H+65) this.alive=false;
+      return;
+    }
+
+    // Count nearby airborne gulls
+    let nearbyGulls=0;
+    for(const g of gulls){
+      if(!g.airborne) continue;
+      if(Math.hypot(g.x-this.x,g.y-this.y)<this.r) nearbyGulls++;
+    }
+    this.radioing = nearbyGulls>0 && !this.overwhelmed;
+
+    if (nearbyGulls>=20) {
+      this.overwhelmed=true; this.radioing=false; this.spd=3.2;
+      this.tx = this.x<W/2 ? -100 : W+100; this.ty=this.y;
+      const policeGain=30*scoreMultiplier;
+      score+=policeGain; growthMeter+=20;
+      scorePopup(this.x, this.y, policeGain, '#fd79a8');
+      runPoliceOverwhelmed++;
+      if(runPoliceOverwhelmed>=15) unlockAch('deflock');
+    }
+  }
+  draw() {
+    ctx.save(); ctx.translate(this.x,this.y);
+
+    if (this.radioing) {
+      // Pulsing red radius
+      const pulse=0.07+Math.abs(Math.sin(frame*0.14))*0.07;
+      ctx.beginPath(); ctx.arc(0,0,this.r,0,Math.PI*2);
+      ctx.fillStyle=`rgba(255,50,50,${pulse})`; ctx.fill();
+      ctx.strokeStyle='rgba(255,60,60,0.35)'; ctx.lineWidth=1.5; ctx.stroke();
+    }
+    // Officer body
+    ctx.fillStyle='#1565C0';
+    ctx.beginPath(); ctx.ellipse(0,0,7,10,0,0,Math.PI*2); ctx.fill();
+    ctx.fillStyle='#f5cba7';
+    ctx.beginPath(); ctx.arc(0,-13,6,0,Math.PI*2); ctx.fill();
+    // Cap
+    ctx.fillStyle='#0d47a1';
+    ctx.beginPath(); ctx.arc(0,-17,6,Math.PI,Math.PI*2); ctx.fill();
+    ctx.fillRect(-8,-17,16,3);
+    // Radio emoji when radioing
+    if (this.radioing) {
+      ctx.font='14px sans-serif'; ctx.textAlign='center';
+      ctx.fillText('📻',14,-4);
+    }
+    ctx.restore();
+  }
+}
+
+// ── NEWS VAN ───────────────────────────────────────────────
+// Spawns rarely on the far sidewalk at stage 3. Auto-despawns after ~10s.
+// Swarm with 5+ gulls → 2× multiplier + golden screen aura. Can respawn.
+class NewsVan {
+  constructor() {
+    this.x    = rnd(100, W-100);
+    this.y    = H_STAGE3 - 55;
+    this.t    = 0;
+    this.life = rnd(480, 720);  // ~8–12s before auto-despawn
+    this.activated = false;
+    this.fleeing   = false;
+    this.vy        = 0;
+    this.alive     = true;
+  }
+  update() {
+    this.t += 0.06;
+    // After activation: drive off the bottom of the screen
+    if (this.fleeing) {
+      this.vy = Math.min(this.vy + 0.25, 6);
+      this.y += this.vy;
+      if (this.y > H+90) this.alive = false;
+      return;
+    }
+    // Auto-despawn when time runs out (fades in last 120 frames)
+    this.life--;
+    if (this.life <= 0) { this.alive = false; return; }
+
+    let nearbyGulls=0;
+    for (const g of gulls) {
+      if (!g.airborne) continue;
+      if (Math.hypot(g.x-this.x,g.y-this.y)<55) nearbyGulls++;
+    }
+    if (nearbyGulls>=5) {
+      this.activated=true; this.fleeing=true;
+      scoreMultiplier=2; multiplierTimer=1800; goldFlash=0.6;
+      const vanGain=80*scoreMultiplier; score+=vanGain; growthMeter+=40;
+      scorePopup(this.x, this.y-30, vanGain, '#ffd700');
+      playNewsJingle();
+      runNewsVans++;
+      if(runNewsVans>=3) unlockAch('news_van');
+      for(let i=0;i<5;i++){
+        const p=new Particle(this.x+rnd(-20,20),this.y+rnd(-14,14),2);
+        p.text=['📺','⭐','LIVE!'][Math.floor(rnd(0,3))];
+        p.col='#ffd700'; p.sz=rnd(12,18); p.dec=0.008; particles.push(p);
+      }
+    }
+  }
+  draw() {
+    const fadeAlpha = (!this.activated && this.life<120) ? this.life/120 : 1;
+    ctx.save(); ctx.globalAlpha=fadeAlpha; ctx.translate(this.x,this.y);
+    if (this.activated) { ctx.shadowBlur=18; ctx.shadowColor='#ffd700'; }
+    ctx.fillStyle='#f5f5f5';
+    ctx.beginPath(); rrPath(-30,-16,60,32,5); ctx.fill();
+    ctx.shadowBlur=0;
+    ctx.fillStyle='#c0392b'; ctx.fillRect(-30,-16,60,11);
+    ctx.fillStyle='#fff'; ctx.font='bold 7px Nunito'; ctx.textAlign='center';
+    ctx.fillText('CHANNEL 7 NEWS',0,-8);
+    ctx.strokeStyle='#777'; ctx.lineWidth=1.5;
+    ctx.beginPath(); ctx.moveTo(10,-16); ctx.lineTo(10,-28); ctx.stroke();
+    ctx.beginPath(); ctx.arc(10,-33,6,Math.PI*0.7,Math.PI*2.3); ctx.stroke();
+    ctx.fillStyle='#222';
+    for(const wx of [-18,18]){ ctx.beginPath(); ctx.arc(wx,16,5,0,Math.PI*2); ctx.fill(); }
+    ctx.font='11px sans-serif'; ctx.fillText('📺',0,4);
+    if (!this.activated && this.life<180) {
+      // Fading warning — blink as it's about to leave
+      if(Math.sin(this.t*12)>0){
+        ctx.fillStyle='rgba(255,255,255,0.6)'; ctx.font='bold 7px Nunito';
+        ctx.fillText('LEAVING SOON',0,-22);
+      }
+    }
+    if (this.activated) {
+      const blink=Math.sin(this.t*10)>0;
+      ctx.fillStyle=blink?'#e74c3c':'#c0392b';
+      ctx.font='bold 8px Nunito'; ctx.textAlign='center';
+      ctx.fillText('● LIVE',0,-20);
+    }
+    ctx.restore();
+  }
+}
+
+// ── SCORE POPUP ────────────────────────────────────────────
+// Floats a score label above a position then fades out.
+function scorePopup(x, y, amount, col='#ffeaa7') {
+  const p = new Particle(x, y-30, 1);
+  p.text = '+'+Math.floor(amount);
+  p.col  = col; p.sz = 20;      // bigger than before
+  p.vx   = 0;   p.vy = -1.0; p.dec = 0.009;  // slower fade, ~110 frames
+  particles.push(p);
+}
+
+// ── BOAT ───────────────────────────────────────────────────
+// Large drifting target in harbor zone. Needs 20+ gulls to start sinking.
+// Sinks slowly over ~8s, releasing a chip charge when half-sunk.
+class Boat {
+  constructor() {
+    this.x   = rnd(100,W-100);
+    this.y   = H_STAGE3+42 + rnd(0,25);
+    this.vx  = rnd(-0.25,0.25);
+    this.w   = 72; this.h = 28;
+    this.sinking     = false;
+    this.sinkProgress= 0;
+    this.damage      = 0;      // persistent 0–100, never resets
+    this.scored      = false;
+    this.nearbyGulls = 0;
+    this.alive       = true;
+    this.t           = 0;
+    this.col         = ['#8d6e63','#5d4037','#6d4c41'][Math.floor(rnd(0,3))];
+  }
+  update() {
+    this.t++;
+    this.x += this.vx;
+    if(this.x<50) this.vx=Math.abs(this.vx);
+    if(this.x>W-50) this.vx=-Math.abs(this.vx);
+
+    if (this.sinking) {
+      this.sinkProgress = Math.min(1, this.sinkProgress+0.0018);
+      this.y += 0.55;
+      if (!this.scored && this.sinkProgress>0.35) {
+        this.scored=true;
+        const gained=500*scoreMultiplier;
+        score+=gained; growthMeter+=60;
+        chipCharges=Math.min(CHIP_MAX,chipCharges+1);
+        scorePopup(this.x, this.y-30, gained, '#74b9ff');
+        playBoatSink(); playChipEarned();
+        runBoatsSunk++;
+        if(runBoatsSunk>=5) unlockAch('boat_sinker');
+        for(let i=0;i<8;i++){
+          const p=new Particle(this.x+rnd(-30,30),this.y+rnd(-12,12),2);
+          p.text=['~','·','*'][Math.floor(rnd(0,3))];
+          p.col='#74b9ff'; p.sz=rnd(11,17); p.dec=0.01; particles.push(p);
+        }
+      }
+      if(this.sinkProgress>=1) this.alive=false;
+      return;
+    }
+
+    // Only check gulls that are actually in the harbor zone (cheap y-gate)
+    let nearbyGulls=0;
+    for (const g of gulls) {
+      if (!g.airborne || g.y<H_STAGE3+20) continue;
+      if (Math.hypot(g.x-this.x,g.y-this.y)<70) nearbyGulls++;
+    }
+    this.nearbyGulls=nearbyGulls;
+    // Damage accumulates when gulls are present, never resets
+    if (nearbyGulls>0) {
+      const rate = nearbyGulls>=10?0.44 : nearbyGulls>=5?0.28 : 0.16;  // ~57% faster
+      this.damage = Math.min(100, this.damage + rate);
+      const mult=nearbyGulls>=10?2.5:nearbyGulls>=5?1.5:1.0;
+      score+=0.08*mult*scoreMultiplier; growthMeter+=0.04*mult;
+    }
+    if (this.damage>=100 && !this.sinking) { this.sinking=true; }
+  }
+  draw() {
+    const sinkY = this.sinking ? this.sinkProgress*20 : 0;
+    const alpha = this.sinking ? 1-this.sinkProgress*0.65 : 1;
+    const tilt  = this.sinking ? this.sinkProgress*0.55 : 0; // strong tilt during sinking
+    ctx.save(); ctx.globalAlpha=alpha; ctx.translate(this.x, this.y+sinkY);
+    ctx.rotate(tilt);
+
+    // Hull
+    ctx.fillStyle=this.col;
+    ctx.beginPath();
+    ctx.moveTo(-this.w/2,2); ctx.lineTo(-this.w/2+8,this.h);
+    ctx.lineTo(this.w/2-8,this.h); ctx.lineTo(this.w/2,2); ctx.closePath(); ctx.fill();
+    // Deck
+    ctx.fillStyle='#a1887f'; ctx.fillRect(-this.w/2+4,-6,this.w-8,10);
+    // Cabin
+    ctx.fillStyle='#eceff1';
+    ctx.beginPath(); rrPath(-14,-22,28,18,3); ctx.fill();
+    ctx.fillStyle='rgba(100,200,255,0.5)';
+    ctx.beginPath(); rrPath(-10,-20,9,8,2); ctx.fill();
+    ctx.beginPath(); rrPath(1,-20,9,8,2); ctx.fill();
+    // Mast
+    ctx.strokeStyle='#4e342e'; ctx.lineWidth=2;
+    ctx.beginPath(); ctx.moveTo(0,-6); ctx.lineTo(0,-36); ctx.stroke();
+    if (!this.sinking) {
+      ctx.fillStyle='#e74c3c';
+      ctx.beginPath(); ctx.moveTo(0,-36); ctx.lineTo(13,-30); ctx.lineTo(0,-24); ctx.closePath(); ctx.fill();
+    }
+    // Fishermen dots
+    ctx.fillStyle='#f5cba7';
+    for(const fx of [-22,0,22]){ ctx.beginPath(); ctx.arc(fx,-9,3.5,0,Math.PI*2); ctx.fill(); }
+    // Water rising when sinking
+    if (this.sinking) {
+      ctx.fillStyle=`rgba(26,83,118,${this.sinkProgress*0.55})`;
+      ctx.fillRect(-this.w/2+4,-6+this.sinkProgress*22,this.w-8,10);
+    }
+
+    // Damage bar — always visible once any damage taken, fills red as boat takes hits
+    if (!this.sinking && this.damage>0) {
+      const pct=this.damage/100;
+      ctx.save(); ctx.rotate(-tilt);
+      fillRR(-26,this.h+4,52,6,2,'rgba(0,0,0,0.45)');
+      const barCol=pct>0.7?'#e74c3c':pct>0.4?'#f39c12':'#74b9ff';
+      fillRR(-26,this.h+4,52*pct,6,2,barCol);
+      ctx.restore();
+    }
+    ctx.restore();
+  }
+}
+
+// ── SHARK ───────────────────────────────────────────────────
+// Fixed: only scans harbor-zone gulls (y > H_STAGE3+45), no emoji splash,
+// fin draws in world-up space regardless of movement direction.
+class Shark {
+  constructor() {
+    this.x  = rnd(50,W-50);
+    this.y  = rnd(H_STAGE3+80, H_STAGE4-60);
+    this.tx = rnd(50,W-50); this.ty=rnd(H_STAGE3+80,H_STAGE4-60);
+    this.spd=rnd(1.0,1.8); this.wt=0; this.alive=true; this.t=0;
+  }
+  update() {
+    this.t++;
+    this.wt--;
+    if(this.wt<=0){
+      this.wt=rnd(120,260)|0;
+      this.tx=rnd(50,W-50); this.ty=rnd(H_STAGE3+80,H_STAGE4-60);
+    }
+    const dx=this.tx-this.x,dy=this.ty-this.y,dd=Math.hypot(dx,dy)+0.001;
+    if(dd>3){this.x+=(dx/dd)*this.spd;this.y+=(dy/dd)*this.spd;}
+    this.x=clamp(this.x,30,W-30);
+    this.y=clamp(this.y,H_STAGE3+65,H_STAGE4-45);
+
+    // Only scan gulls in water zone — cheap y-gate before expensive hypot
+    for(let i=gulls.length-1;i>=0;i--){
+      const g=gulls[i];
+      if (g.y < H_STAGE3+45) continue;  // not in water, skip
+      if (Math.hypot(g.x-this.x,g.y-this.y)<42){
+        gulls.splice(i,1);
+        statGullsKilled++;
+        // Simple splash — no emoji
+        for(let j=0;j<2;j++){
+          const p=new Particle(this.x+rnd(-10,10),this.y+rnd(-6,6),1);
+          p.text='~'; p.col='#74b9ff';
+          p.sz=rnd(11,15); p.vx=rnd(-1.5,1.5); p.vy=rnd(-1.5,0.3); p.dec=0.035;
+          particles.push(p);
+        }
+        break;
+      }
+    }
+  }
+  draw() {
+    ctx.save(); ctx.translate(this.x,this.y);
+    const ang=Math.atan2(this.ty-this.y,this.tx-this.x);
+    // Body ellipse rotates with direction
+    ctx.save(); ctx.rotate(ang);
+    ctx.fillStyle='rgba(20,45,80,0.28)';
+    ctx.beginPath(); ctx.ellipse(0,4,26,9,0,0,Math.PI*2); ctx.fill();
+    ctx.restore();
+
+    // Fin sweeps BACK from direction of travel — hypotenuse faces forward.
+    // Leading edge is steep, trailing edge is swept like a real dorsal fin.
+    const movingRight = Math.cos(ang)>=0;
+    const sx = movingRight ? 1 : -1; // mirror for left travel
+
+    // Draw fin in world-up space (always points skyward), mirrored for direction
+    ctx.save(); ctx.scale(sx,1);
+    // Fin shape: right angle at base-right, tip at top-left, swept trailing edge
+    ctx.fillStyle='#e8ecf0';  // light grey — clearly visible against dark water
+    ctx.beginPath();
+    ctx.moveTo(-8, 2);         // base left
+    ctx.lineTo( 9, 2);         // base right (right angle here)
+    ctx.lineTo(-8,-22);        // tip (swept back from direction of travel)
+    ctx.closePath(); ctx.fill();
+    // Slight shadow shading on the leading face
+    ctx.fillStyle='rgba(100,130,180,0.35)';
+    ctx.beginPath();
+    ctx.moveTo(-8,2); ctx.lineTo(9,2); ctx.lineTo(-8,-22); ctx.closePath(); ctx.fill();
+    // Organic trailing-edge curve hint
+    ctx.strokeStyle='rgba(180,200,220,0.6)'; ctx.lineWidth=1;
+    ctx.beginPath();
+    ctx.moveTo(-8,2); ctx.quadraticCurveTo(-4,-8,-8,-22); ctx.stroke();
+    ctx.restore();
+
+    // Water surface line — fin emerges from here
+    ctx.strokeStyle='rgba(100,180,255,0.45)'; ctx.lineWidth=1.5;
+    ctx.beginPath(); ctx.moveTo(-12,2); ctx.lineTo(12,2); ctx.stroke();
+
+    ctx.restore();
+  }
+}
+
+// ── HELICOPTER ─────────────────────────────────────────────
+// Boss unit. Spawns once at HELICOPTER_FLOCK gulls.
+// Chases flock center. Rotor zone scatters gulls.
+// Tail rotor = weak point: sustained gull contact causes tail failure → spiral crash → +1000 pts.
+class Helicopter {
+  constructor() {
+    this.x=W/2+rnd(-80,80); this.y=-80;
+    this.vx=0; this.vy=1.5;
+    this.maxSpd=DIFF[difficulty].heliSpd;
+    this.rotorAngle=0;
+    this.facing=Math.PI/2;
+    this.smoothFacing=Math.PI/2; // lerped facing for drawing — prevents snappy rotation
+    this.tailHits=0;
+    this.tailBroken=false;
+    this.spiralAngle=0; this.spiralSpeed=0;
+    this.crashTimer=0;
+    this.crashed=false; this.wreckLife=0;
+    this.alive=true;
+  }
+  update() {
+    if (this.crashed) {
+      return;  // permanent wreck, no smoke
+    }
+
+    this.rotorAngle += this.tailBroken ? 0.08+this.spiralSpeed*0.5 : 0.22;
+
+    if (this.tailBroken) {
+      this.spiralSpeed=Math.min(this.spiralSpeed+0.004, 0.28);
+      this.spiralAngle+=0.05+this.spiralSpeed;
+      // Bouncing chaotic motion — vx oscillates, vy accelerates, bounces off walls
+      this.bounceVx = (this.bounceVx||rnd(-3,3));
+      this.bounceVy = (this.bounceVy||(-2));
+      this.bounceVy += 0.08;
+      this.x += this.bounceVx;
+      this.y += this.bounceVy;
+      // Bounce off screen sides
+      if(this.x<40){this.x=40;this.bounceVx=Math.abs(this.bounceVx)*0.8;}
+      if(this.x>W-40){this.x=W-40;this.bounceVx=-Math.abs(this.bounceVx)*0.8;}
+      // Clamp and count
+      this.crashTimer++;
+      // Crash once it hits the ground zone or after ~4 seconds
+      if (this.crashTimer>240 || this.y>H_BASE-30) {
+        this.y=clamp(this.y,0,H_BASE-30); // land on beach/promenade, not off-screen
+        this.crashed=true;
+        const heliGain=5000*scoreMultiplier;
+        score+=heliGain; growthMeter+=100;
+        scorePopup(this.x, this.y-45, heliGain, '#ffd700');
+        playHeliCrash();
+        unlockAch('heli_killer');
+        // Big permanent scorch on the ground where it lands
+        worldDamage.scorchMarks.push({x:this.x, y:this.y, big:true});
+        for(let i=0;i<22;i++){
+          const p=new Particle(this.x+rnd(-55,55),this.y+rnd(-40,40),4);
+          p.text=['💥','🔥','BOOM','!!!','★'][Math.floor(rnd(0,5))];
+          p.col='#e17055'; p.sz=rnd(16,32); p.dec=0.004; particles.push(p);
+        }
+        goldFlash=0.9; return;
+      }
+    } else {
+      // Track flock center, stay in beach/promenade zone
+      if(gulls.length>0){
+        let cx=0,cy=0;
+        for(const g of gulls){cx+=g.x;cy+=g.y;}
+        cx/=gulls.length; cy/=gulls.length;
+        // Only target gulls in beach zone
+        cy=clamp(cy,50,H_STAGE2-50);
+        const dx=cx-this.x,dy=cy-this.y,dd=Math.hypot(dx,dy)+0.001;
+        this.vx+=(dx/dd)*0.07; this.vy+=(dy/dd)*0.07;
+        const spd=Math.hypot(this.vx,this.vy);
+        if(spd>this.maxSpd){this.vx*=this.maxSpd/spd;this.vy*=this.maxSpd/spd;}
+      }
+      // Soft boundary: stay in beach/promenade
+      if(this.x<60)  this.vx+=0.18; if(this.x>W-60) this.vx-=0.18;
+      if(this.y<55)  this.vy+=0.18; if(this.y>H_STAGE2-55) this.vy-=0.18;
+    }
+
+    this.x+=this.vx; this.y+=this.vy;
+    this.facing=Math.atan2(this.vy,this.vx);
+    // Smooth facing — lerp toward real angle to avoid snappy rotation
+    let df=this.facing-this.smoothFacing;
+    while(df>Math.PI)df-=Math.PI*2; while(df<-Math.PI)df+=Math.PI*2;
+    this.smoothFacing+=df*0.06;  // 6% per frame — slow smooth turn
+
+    // Rotor zone: scatter gulls within 55px, spawn feather on kill
+    let kills=0;
+    for(let i=gulls.length-1;i>=0&&kills<10;i--){
+      const g=gulls[i];
+      if(!g.airborne) continue;
+      const d=Math.hypot(g.x-this.x,g.y-this.y);
+      if(d<52){
+        if(Math.random()<0.15){
+          gulls.splice(i,1); kills++;
+          statGullsKilled++;
+          playDeathSquawk();
+          if(Math.random()<0.7){
+            const p=new Particle(g.x+rnd(-6,6),g.y+rnd(-4,4),1);
+            p.text='🪶'; p.col='#e0e0e0';
+            p.vx=rnd(-3,3); p.vy=rnd(-3,-0.5); p.dec=0.05; particles.push(p);
+          }
+        } else {
+          const ang2=Math.atan2(g.y-this.y,g.x-this.x);
+          g.vx+=Math.cos(ang2)*4; g.vy+=Math.sin(ang2)*4;
+          g.settleTimer=220; kills++;
+        }
+      }
+    }
+
+    // Tail rotor damage — tail is 68px behind (longer boom)
+    if (!this.tailBroken) {
+      const tailAng=this.smoothFacing+Math.PI;
+      const tailX=this.x+Math.cos(tailAng)*68;
+      const tailY=this.y+Math.sin(tailAng)*68;
+      let tailGulls=0;
+      for(const g of gulls){
+        if(g.airborne && Math.hypot(g.x-tailX,g.y-tailY)<30) tailGulls++;
+      }
+      this.tailHits+=tailGulls;
+      if(tailGulls>0&&Math.random()<0.05){
+        const p=new Particle(tailX,tailY-15,1);
+        p.text='💥'; p.col='#e74c3c'; p.sz=12; p.vx=rnd(-1,1); p.vy=-1.5; p.dec=0.03;
+        particles.push(p);
+      }
+      if(this.tailHits>1400){  // increased durability
+        this.tailBroken=true; this.spiralAngle=this.smoothFacing;
+        this.bounceVx=rnd(-3,3); this.bounceVy=-2; this.bounces=0;
+        const p=new Particle(tailX,tailY-20,3);
+        p.text='TAIL ROTOR HIT!'; p.col='#ff4757'; p.sz=16; p.vx=0; p.vy=-1.5; p.dec=0.007;
+        particles.push(p);
+      }
+    }
+  }
+
+  draw() {
+    if (this.crashed) {
+      // Draw in world space directly — no outer save/translate to mismatch
+      const ang = this.wreckAngle || (this.wreckAngle = rnd(-0.4,0.4));
+      ctx.save(); ctx.translate(this.x,this.y); ctx.rotate(ang);
+      ctx.fillStyle='#1a1a1a';
+      ctx.beginPath(); rrPath(-22,-10,44,20,4); ctx.fill();
+      ctx.fillStyle='rgba(255,70,0,0.5)';
+      ctx.beginPath(); rrPath(-22,-10,44,20,4); ctx.fill();
+      ctx.strokeStyle='#2a2a2a'; ctx.lineWidth=3;
+      ctx.beginPath(); ctx.moveTo(-4,0); ctx.quadraticCurveTo(-38,8,-58,3); ctx.stroke();
+      ctx.fillStyle='rgba(80,150,200,0.25)';
+      ctx.beginPath(); ctx.arc(10,0,8,0,Math.PI*2); ctx.fill();
+      ctx.strokeStyle='rgba(255,255,255,0.3)'; ctx.lineWidth=1;
+      ctx.beginPath(); ctx.moveTo(6,-5); ctx.lineTo(14,5); ctx.stroke();
+      ctx.strokeStyle='#333'; ctx.lineWidth=2;
+      ctx.beginPath(); ctx.moveTo(0,0); ctx.lineTo(42,8); ctx.stroke();
+      ctx.strokeStyle='#444'; ctx.lineWidth=1.5;
+      ctx.beginPath(); ctx.moveTo(-15,14); ctx.lineTo(12,16); ctx.stroke();
+      ctx.restore();
+      // Fire emoji in screen space
+      ctx.save(); ctx.globalAlpha=0.8;
+      ctx.font='16px sans-serif'; ctx.textAlign='center';
+      ctx.fillText('🔥',this.x,this.y-16);
+      ctx.restore();
+      return;
+    }
+
+    ctx.save(); ctx.translate(this.x,this.y);
+
+    ctx.rotate(this.smoothFacing);  // smooth, not snappy
+
+    // Rotor disc
+    const rotorOpacity=0.18+Math.abs(Math.sin(this.rotorAngle*4))*0.08;
+    ctx.beginPath(); ctx.arc(0,0,50,0,Math.PI*2);
+    ctx.fillStyle=`rgba(200,200,200,${rotorOpacity})`; ctx.fill();
+
+    // Spinning rotor blades
+    ctx.strokeStyle='rgba(60,60,60,0.75)'; ctx.lineWidth=3;
+    for(let i=0;i<2;i++){
+      const a=this.rotorAngle+i*Math.PI;
+      ctx.beginPath();
+      ctx.moveTo(Math.cos(a)*48,Math.sin(a)*48);
+      ctx.lineTo(-Math.cos(a)*48,-Math.sin(a)*48);
+      ctx.stroke();
+    }
+
+    // Tail boom — longer (68px)
+    ctx.strokeStyle='#2d3436'; ctx.lineWidth=4;
+    ctx.beginPath(); ctx.moveTo(-4,0); ctx.lineTo(-68,0); ctx.stroke();
+
+    // Fuselage
+    ctx.fillStyle=this.tailBroken?'#7f1d1d':'#2d3436';
+    ctx.shadowBlur=8; ctx.shadowColor='rgba(0,0,0,0.4)';
+    ctx.beginPath(); rrPath(-18,-11,38,22,5); ctx.fill();
+    ctx.shadowBlur=0;
+
+    // Cockpit glazing
+    ctx.fillStyle='rgba(100,200,255,0.45)';
+    ctx.beginPath(); ctx.arc(12,0,9,0,Math.PI*2); ctx.fill();
+
+    // Skids
+    ctx.strokeStyle='#555'; ctx.lineWidth=1.5;
+    for(const sy of [-10,10]){
+      ctx.beginPath(); ctx.moveTo(-15,sy+12); ctx.lineTo(15,sy+12); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(-8,sy); ctx.lineTo(-8,sy+12); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(8,sy); ctx.lineTo(8,sy+12); ctx.stroke();
+    }
+
+    // Tail rotor at -68
+    const trCol=this.tailBroken?'#ff4757':'#555';
+    ctx.strokeStyle=trCol; ctx.lineWidth=2;
+    ctx.beginPath(); ctx.moveTo(-68,-8); ctx.lineTo(-68,8); ctx.stroke();
+
+    // Red target ring on tail — visible instruction for weak point
+    if (!this.tailBroken) {
+      const pulse=0.5+Math.abs(Math.sin(this.rotorAngle*3))*0.5;
+      ctx.strokeStyle=`rgba(255,50,50,${0.55+pulse*0.35})`; ctx.lineWidth=1.8;
+      ctx.beginPath(); ctx.arc(-68,0,14,0,Math.PI*2); ctx.stroke();
+      // Inner crosshair dot
+      ctx.fillStyle=`rgba(255,50,50,${0.6+pulse*0.3})`;
+      ctx.beginPath(); ctx.arc(-68,0,3,0,Math.PI*2); ctx.fill();
+    } else {
+      ctx.shadowBlur=12; ctx.shadowColor='#ff4757';
+      ctx.strokeStyle='#ff4757'; ctx.lineWidth=2;
+      ctx.beginPath(); ctx.moveTo(-68,-8); ctx.lineTo(-68,8); ctx.stroke();
+      ctx.shadowBlur=0;
+    }
+
+    // Tail damage progress bar
+    if(!this.tailBroken && this.tailHits>0){
+      const pct=Math.min(1,this.tailHits/1400);
+      ctx.save(); ctx.rotate(-this.smoothFacing);
+      fillRR(-20,-32,40,5,2,'rgba(0,0,0,0.5)');
+      fillRR(-20,-32,40*pct,5,2,`rgba(255,${Math.floor(200*(1-pct))},0,0.9)`);
+      ctx.restore();
+    }
+
+    ctx.restore();
+
+    // Warning label (in screen space)
+    if(!this.crashed){
+      ctx.fillStyle=this.tailBroken?'#ff4757':'rgba(255,60,60,0.85)';
+      ctx.font='bold 9px Nunito'; ctx.textAlign='center';
+      ctx.fillText(this.tailBroken?'🚁 SPINNING OUT!':'🚁 HELICOPTER!',
+                   this.x, this.y-(this.tailBroken?38:30));
+    }
+  }
+}
+
+// ── BACKGROUND ─────────────────────────────────────────────
+function drawBackground() {
+  // ── Ocean (always) ──────────────────────────────────────
+  const og=ctx.createLinearGradient(0,0,0,95);
+  og.addColorStop(0,'#1a6fa8'); og.addColorStop(1,'#4a9fd4');
+  ctx.fillStyle=og; ctx.fillRect(0,0,W,95);
+  for(let w=0;w<3;w++){
+    ctx.strokeStyle=`rgba(255,255,255,${0.12+w*0.07})`; ctx.lineWidth=1.8;
+    ctx.beginPath();
+    for(let x=0;x<=W;x+=8){
+      const y=48+w*16+Math.sin(x*0.025+frame*0.04+w*1.2)*6;
+      x===0?ctx.moveTo(x,y):ctx.lineTo(x,y);
+    }
+    ctx.stroke();
+  }
+
+  // ── Sand (always fixed 95..H_BASE-45) ───────────────────
+  const sg=ctx.createLinearGradient(0,95,0,H_BASE-45);
+  sg.addColorStop(0,'#f2c64a'); sg.addColorStop(1,'#e8b838');
+  ctx.fillStyle=sg; ctx.fillRect(0,95,W,H_BASE-140);
+
+  for(const t of TOWELS){
+    ctx.save(); ctx.translate(t.x,t.y); ctx.rotate(t.r);
+    fillRR(-t.w/2,-t.h/2,t.w,t.h,3,t.c);
+    ctx.fillStyle='rgba(255,255,255,0.27)';
+    for(let s=-t.w/2+5;s<t.w/2;s+=8) ctx.fillRect(s,-t.h/2,3,t.h);
+    ctx.restore();
+  }
+  for(let ui=0; ui<UMBRELLAS.length; ui++){
+    const u=UMBRELLAS[ui];
+    const knocked=worldDamage.umbrellaDown.includes(ui);
+    ctx.save(); ctx.translate(u.x, u.y);
+    if (knocked) {
+      // Ground shadow — flat ellipse at base, no rotation weirdness
+      ctx.fillStyle='rgba(0,0,0,0.15)';
+      ctx.beginPath(); ctx.ellipse(20, 28, 38, 8, 0, 0, Math.PI*2); ctx.fill();
+      // Pole — lying horizontal to the right
+      ctx.strokeStyle='#8B4513'; ctx.lineWidth=2.5;
+      ctx.beginPath(); ctx.moveTo(0, 26); ctx.lineTo(46, 26); ctx.stroke();
+      // Deflated canopy — flattened ellipse where canopy tip would land
+      ctx.fillStyle=u.c;
+      ctx.beginPath(); ctx.ellipse(46, 22, 22, 8, -0.15, 0, Math.PI*2); ctx.fill();
+      // Highlight strip on canopy
+      ctx.fillStyle='rgba(255,255,255,0.18)';
+      ctx.beginPath(); ctx.ellipse(46, 20, 14, 4, -0.15, 0, Math.PI*2); ctx.fill();
+    } else {
+      ctx.strokeStyle='#8B4513'; ctx.lineWidth=2.5;
+      ctx.beginPath(); ctx.moveTo(0,28); ctx.lineTo(0,-3); ctx.stroke();
+      ctx.fillStyle=u.c;
+      ctx.beginPath(); ctx.arc(0,0,30,Math.PI,Math.PI*2);
+      ctx.lineTo(0,0); ctx.closePath(); ctx.fill();
+      ctx.fillStyle='rgba(255,255,255,0.2)';
+      ctx.beginPath(); ctx.arc(0,0,30,Math.PI,Math.PI*1.5);
+      ctx.lineTo(0,0); ctx.closePath(); ctx.fill();
+      ctx.fillStyle='rgba(0,0,0,0.08)';
+      ctx.beginPath(); ctx.ellipse(12,30,25,7,0.15,0,Math.PI*2); ctx.fill();
+    }
+    ctx.restore();
+  }
+
+  // Ice cream stand
+  const sx=838,sy=295;
+  fillStrokeRR(sx-22,sy-18,44,38,4,'#fff','#ddd',1);
+  ctx.fillStyle='#c0392b';
+  ctx.beginPath();
+  ctx.moveTo(sx-28,sy-18); ctx.lineTo(sx+28,sy-18);
+  ctx.lineTo(sx+22,sy-35); ctx.lineTo(sx-22,sy-35);
+  ctx.closePath(); ctx.fill();
+  ctx.fillStyle='rgba(255,255,255,0.32)';
+  for(let xs=sx-18;xs<sx+22;xs+=9){
+    ctx.beginPath();
+    ctx.moveTo(xs,sy-18); ctx.lineTo(xs+4,sy-18); ctx.lineTo(xs,sy-35); ctx.closePath(); ctx.fill();
+  }
+  ctx.font='18px sans-serif'; ctx.textAlign='center';
+  ctx.fillText('🍦',sx,sy+6);
+
+  // ── Stage 2: extended promenade below beach ──────────────
+  if (H > H_BASE) {
+    const pY = H_BASE - 45;  // promenade starts here
+
+    // Extended concrete — fills from beach border to bottom
+    ctx.fillStyle='#9ea8b0'; ctx.fillRect(0, pY, W, H-pY);
+
+    // Subtle concrete texture lines
+    ctx.strokeStyle='rgba(0,0,0,0.07)'; ctx.lineWidth=1;
+    for(let py=pY+18; py<H; py+=22){
+      ctx.beginPath(); ctx.moveTo(0,py); ctx.lineTo(W,py); ctx.stroke();
+    }
+
+    // Dashed road line in the extended zone
+    ctx.strokeStyle='rgba(255,255,255,0.35)'; ctx.lineWidth=2;
+    ctx.setLineDash([18,12]);
+    ctx.beginPath(); ctx.moveTo(0,H_BASE+50); ctx.lineTo(W,H_BASE+50); ctx.stroke();
+    ctx.setLineDash([]);
+
+    // Storefront facades at the bottom of the world
+    if (H >= H_STAGE2 - 20) {
+      drawStorefronts();
+    }
+  } else {
+    // Stage 1 promenade strip
+    ctx.fillStyle='#bfc8cc'; ctx.fillRect(0,H_BASE-45,W,45);
+    ctx.strokeStyle='#a8b2b5'; ctx.lineWidth=1.5;
+    ctx.beginPath(); ctx.moveTo(0,H_BASE-45); ctx.lineTo(W,H_BASE-45); ctx.stroke();
+    ctx.strokeStyle='rgba(255,255,255,0.45)'; ctx.lineWidth=2;
+    ctx.setLineDash([18,12]);
+    ctx.beginPath(); ctx.moveTo(0,H_BASE-22); ctx.lineTo(W,H_BASE-22); ctx.stroke();
+    ctx.setLineDash([]);
+  }
+
+  // ── Stage 3: road zone below promenade ──────────────────
+  if (H > H_STAGE2) {
+    const roadTop = H_STAGE2;
+    const laneCenter = roadTop+60;
+    // Asphalt (draws on top of promenade concrete below the border)
+    ctx.fillStyle='#37474f';
+    ctx.fillRect(0, roadTop, W, Math.min(H,roadTop+122)-roadTop);
+    // Subtle texture
+    ctx.strokeStyle='rgba(255,255,255,0.04)'; ctx.lineWidth=1;
+    for(let py=roadTop+18;py<Math.min(H,roadTop+122);py+=22){
+      ctx.beginPath(); ctx.moveTo(0,py); ctx.lineTo(W,py); ctx.stroke();
+    }
+    // Lane markings
+    ctx.strokeStyle='rgba(255,255,255,0.55)'; ctx.lineWidth=2;
+    ctx.setLineDash([22,16]);
+    if(H>roadTop+28){ ctx.beginPath(); ctx.moveTo(0,roadTop+28); ctx.lineTo(W,roadTop+28); ctx.stroke(); }
+    if(H>roadTop+92){ ctx.beginPath(); ctx.moveTo(0,roadTop+92); ctx.lineTo(W,roadTop+92); ctx.stroke(); }
+    // Yellow center
+    if(H>laneCenter){ ctx.strokeStyle='rgba(255,215,50,0.65)'; ctx.lineWidth=3; ctx.setLineDash([]); ctx.beginPath(); ctx.moveTo(0,laneCenter); ctx.lineTo(W,laneCenter); ctx.stroke(); }
+    ctx.setLineDash([]);
+
+    // Tire tracks from crashed cars
+    if(worldDamage.tireTracks.length>0){
+      ctx.strokeStyle='rgba(0,0,0,0.35)'; ctx.lineWidth=3;
+      ctx.setLineDash([8,6]);
+      for(const t of worldDamage.tireTracks){
+        ctx.beginPath(); ctx.moveTo(t.x1,t.y1); ctx.lineTo(t.x2,t.y2); ctx.stroke();
+        // Second track ~8px offset
+        ctx.beginPath(); ctx.moveTo(t.x1,t.y1+8); ctx.lineTo(t.x2,t.y2+8); ctx.stroke();
+      }
+      ctx.setLineDash([]);
+    }
+    // Scorch marks — plain dark ellipses, big for helicopter, small for cars
+    for(const s of worldDamage.scorchMarks){
+      ctx.fillStyle='rgba(0,0,0,0.32)';
+      const rx=s.big?55:28, ry=s.big?22:12;
+      ctx.beginPath(); ctx.ellipse(s.x,s.y,rx,ry,0,0,Math.PI*2); ctx.fill();
+    }
+    // Far sidewalk
+    if(H>H_STAGE2+122){
+      ctx.fillStyle='#8d9eaa'; ctx.fillRect(0,H_STAGE2+122,W,H-(H_STAGE2+122));
+      ctx.strokeStyle='rgba(0,0,0,0.06)'; ctx.lineWidth=1;
+      for(let py=H_STAGE2+140;py<Math.min(H,H_STAGE3);py+=24){ ctx.beginPath(); ctx.moveTo(0,py); ctx.lineTo(W,py); ctx.stroke(); }
+      ctx.strokeStyle='rgba(200,200,200,0.45)'; ctx.lineWidth=2;
+      ctx.beginPath(); ctx.moveTo(0,H_STAGE2+122); ctx.lineTo(W,H_STAGE2+122); ctx.stroke();
+    }
+  }
+
+  // ── Stage 4: harbor / dock ────────────────────────────────
+  if (H > H_STAGE3) {
+    const wg=ctx.createLinearGradient(0,H_STAGE3,0,H_STAGE4);
+    wg.addColorStop(0,'#1a5276'); wg.addColorStop(1,'#0d2b45');
+    ctx.fillStyle=wg; ctx.fillRect(0,H_STAGE3,W,H-H_STAGE3);
+    // Dock planks
+    ctx.fillStyle='#7d6608'; ctx.fillRect(0,H_STAGE3,W,28);
+    ctx.strokeStyle='rgba(0,0,0,0.22)'; ctx.lineWidth=1.5;
+    for(let px=0;px<W;px+=20){ctx.beginPath();ctx.moveTo(px,H_STAGE3);ctx.lineTo(px,H_STAGE3+28);ctx.stroke();}
+    ctx.strokeStyle='rgba(0,0,0,0.12)'; ctx.lineWidth=1;
+    ctx.beginPath(); ctx.moveTo(0,H_STAGE3+14); ctx.lineTo(W,H_STAGE3+14); ctx.stroke();
+    // Animated water
+    if(H>H_STAGE3+30){
+      ctx.strokeStyle='rgba(100,180,255,0.22)'; ctx.lineWidth=1.5;
+      for(let w=0;w<3;w++){
+        ctx.beginPath();
+        for(let x=0;x<=W;x+=10){
+          const y=H_STAGE3+38+w*22+Math.sin(x*0.03+frame*0.025+w*1.5)*5;
+          x===0?ctx.moveTo(x,y):ctx.lineTo(x,y);
+        }
+        ctx.stroke();
+      }
+    }
+    // Dock posts
+    ctx.fillStyle='#5d4037';
+    for(const px of [80,250,450,650,820]){
+      const ph=Math.min(H-H_STAGE3,80);
+      if(ph>0){ ctx.fillRect(px-4,H_STAGE3,8,ph); }
+    }
+  }
+}
+
+// ── STAGE 2 STOREFRONTS ─────────────────────────────────────
+function drawStorefronts() {
+  const y = H_STAGE2 - 65;
+  const shops = [
+    {x:60,  w:140, col:'#e74c3c', label:'🍕 PIZZA'},
+    {x:340, w:160, col:'#2980b9', label:'☕ CAFE'},
+    {x:620, w:140, col:'#27ae60', label:'🍦 GELATO'},
+  ];
+  for (let si=0; si<shops.length; si++) {
+    const s = shops[si];
+    const onFire = worldDamage.fireShops.includes(si);
+    // Awning
+    ctx.fillStyle = onFire ? '#7f1d1d' : s.col;
+    ctx.beginPath();
+    ctx.moveTo(s.x-8, y); ctx.lineTo(s.x+s.w+8, y);
+    ctx.lineTo(s.x+s.w, y+18); ctx.lineTo(s.x, y+18);
+    ctx.closePath(); ctx.fill();
+    // Awning stripes
+    ctx.fillStyle='rgba(255,255,255,0.25)';
+    for(let xs=s.x; xs<s.x+s.w; xs+=16){
+      ctx.beginPath();
+      ctx.moveTo(xs,y); ctx.lineTo(xs+8,y); ctx.lineTo(xs+8-6,y+18); ctx.lineTo(xs-6,y+18);
+      ctx.closePath(); ctx.fill();
+    }
+    // Shopfront
+    fillRR(s.x, y+18, s.w, 47, 2, onFire ? '#3a2020' : '#f5f5f5');
+    ctx.strokeStyle = onFire ? 'rgba(200,80,0,0.4)' : 'rgba(0,0,0,0.15)';
+    ctx.lineWidth=1;
+    ctx.beginPath(); rrPath(s.x,y+18,s.w,47,2); ctx.stroke();
+    // Window — cracked or normal
+    const hasCrack = worldDamage.crackPositions.some(c=>Math.abs(c.x-(s.x+s.w/2))<80);
+    if (hasCrack || onFire) {
+      ctx.fillStyle='rgba(100,130,150,0.25)';
+      fillRR(s.x+12, y+24, s.w-24, 26, 3, 'rgba(80,100,120,0.2)');
+      // Spider crack lines
+      ctx.strokeStyle='rgba(200,210,220,0.65)'; ctx.lineWidth=1;
+      const cx=s.x+s.w/2, cy=y+37;
+      for(let a=0;a<6;a++){
+        const ang=a*Math.PI/3+0.3;
+        ctx.beginPath();
+        ctx.moveTo(cx,cy);
+        ctx.lineTo(cx+Math.cos(ang)*14, cy+Math.sin(ang)*10);
+        ctx.stroke();
+      }
+    } else {
+      fillRR(s.x+12, y+24, s.w-24, 26, 3, 'rgba(173,216,230,0.55)');
+    }
+    // Label
+    ctx.fillStyle = onFire ? '#ff6b6b' : '#333';
+    ctx.font='bold 11px Nunito'; ctx.textAlign='center';
+    ctx.fillText(s.label, s.x+s.w/2, y+56);
+    // Outdoor table
+    const tx=s.x+s.w/2, ty2=y-18;
+    ctx.fillStyle='#795548';
+    ctx.beginPath(); ctx.ellipse(tx, ty2, 18, 8, 0, 0, Math.PI*2); ctx.fill();
+    ctx.fillStyle='rgba(255,255,255,0.5)';
+    ctx.beginPath(); ctx.ellipse(tx, ty2, 14, 5, 0, 0, Math.PI*2); ctx.fill();
+    for(const cx2 of [tx-22, tx+22]){
+      ctx.fillStyle='#a1887f';
+      ctx.beginPath(); ctx.ellipse(cx2, ty2, 7, 4, 0, 0, Math.PI*2); ctx.fill();
+    }
+    // Fire overlay — no smoke particles (performance)
+    if (onFire) {
+      ctx.font='18px sans-serif'; ctx.textAlign='center';
+      ctx.fillText('🔥', s.x+s.w/2, y+8);
+    }
+  }
+}
+
+// ── HUD ─────────────────────────────────────────────────────
+// Layout: one panel, split into rows
+//  Row 1:  [🦅 FLOCK]   [CHAOS SCORE]   [TIME]    ← big readable numbers
+//  divider
+//  Row 2:  [NEW GULL meter]  |  [🍟 CHIPS pips]   ← compact meters
+function drawHUD() {
+  fillRR(8,8,W-16,77,8,'rgba(0,0,0,0.52)');
+
+  // ── Row 1: three columns ──────────────────────────────
+  // Flock (left)
+  ctx.fillStyle='rgba(255,255,255,0.6)'; ctx.font='700 11px Nunito'; ctx.textAlign='left';
+  ctx.fillText('🦅 FLOCK',20,28);
+  ctx.fillStyle='#74b9ff'; ctx.font='30px Bangers';
+  ctx.fillText(gulls.length,20,55);
+
+  // Chaos Score (centre)
+  ctx.fillStyle='rgba(255,255,255,0.6)'; ctx.font='700 11px Nunito'; ctx.textAlign='center';
+  ctx.fillText('CHAOS SCORE',W/2,28);
+  ctx.fillStyle='#fd79a8'; ctx.font='30px Bangers';
+  const scoreX = scoreMultiplier>1 ? W/2-16 : W/2;
+  ctx.fillText(Math.floor(score),scoreX,55);
+  if(scoreMultiplier>1){
+    ctx.shadowBlur=8; ctx.shadowColor='#ffd700';
+    ctx.fillStyle='#ffd700'; ctx.font='18px Bangers';
+    ctx.fillText('×2',W/2+32,55);
+    ctx.shadowBlur=0;
+  }
+
+  // Timer (right) — turns orange when police is radioing in
+  const timerDraining = policeRadioActive;
+  const timerCol = gameTimer<=15 ? '#ff4757' : timerDraining ? '#fd9644' : 'rgba(255,255,255,0.6)';
+  const timerNumCol = gameTimer<=15 ? '#ff4757' : timerDraining ? '#fd9644' : '#fff';
+  ctx.fillStyle=timerCol; ctx.font='700 11px Nunito'; ctx.textAlign='right';
+  ctx.fillText(timerDraining ? '⚠ TIME' : 'TIME', W-20,28);
+  ctx.fillStyle=timerNumCol; ctx.font='30px Bangers';
+  ctx.fillText(gameTimer+'s',W-20,55);
+
+  // Divider between rows
+  ctx.strokeStyle='rgba(255,255,255,0.1)'; ctx.lineWidth=1;
+  ctx.beginPath(); ctx.moveTo(18,59); ctx.lineTo(W-18,59); ctx.stroke();
+
+  // ── Row 2: growth meter (left) + chips (right) ────────
+  const MID = W/2;
+
+  // NEW GULL meter (left half)
+  ctx.fillStyle='rgba(255,255,255,0.5)'; ctx.font='700 9px Nunito'; ctx.textAlign='left';
+  ctx.fillText('NEW GULL',20,73);
+  const mX=100, mY=63, mW=MID-115, mH=11;
+  fillRR(mX,mY,mW,mH,4,'rgba(255,255,255,0.12)');
+  const pct=Math.min(growthMeter/CHAOS_PER_GULL,1);
+  if(pct>0){
+    const g=ctx.createLinearGradient(mX,0,mX+mW,0);
+    g.addColorStop(0,'#fdcb6e'); g.addColorStop(1,'#e17055');
+    fillRR(mX,mY,mW*pct,mH,4,g);
+  }
+
+  // Vertical divider
+  ctx.strokeStyle='rgba(255,255,255,0.1)'; ctx.lineWidth=1;
+  ctx.beginPath(); ctx.moveTo(MID,60); ctx.lineTo(MID,80); ctx.stroke();
+
+  // CHIPS (right half) — label then pips
+  ctx.fillStyle='rgba(255,255,255,0.5)'; ctx.font='700 9px Nunito'; ctx.textAlign='left';
+  ctx.fillText('🍟 CHIPS',MID+12,73);
+
+  // Pip area right-aligned in right half
+  const pipW=20, pipGap=4, totalPips=CHIP_MAX*pipW+(CHIP_MAX-1)*pipGap; // 68px
+  const pipX = W-20-totalPips; // start of first pip
+  for(let i=0;i<CHIP_MAX;i++){
+    const charged=i<chipCharges;
+    if(charged){ctx.shadowBlur=7; ctx.shadowColor='#fdcb6e';}
+    fillRR(pipX+i*(pipW+pipGap),62,pipW,12,3, charged?'#fdcb6e':'rgba(255,255,255,0.12)');
+    ctx.shadowBlur=0;
+  }
+  // Recharge sliver under pips
+  if(chipCharges<CHIP_MAX){
+    const frac=(CHIP_RECHARGE-chipTimer)/CHIP_RECHARGE;
+    fillRR(pipX,76,totalPips,3,1,'rgba(255,255,255,0.1)');
+    fillRR(pipX,76,totalPips*frac,3,1,'#fdcb6e');
+  }
+
+  // New gull flash
+  if(newGullFlash>0){
+    ctx.save();
+    ctx.globalAlpha=Math.min(1,newGullFlash/30);
+    ctx.shadowBlur=14; ctx.shadowColor='#fdcb6e';
+    ctx.fillStyle='#ffeaa7'; ctx.font='700 20px Nunito'; ctx.textAlign='center';
+    ctx.fillText('+1 GULL!',W/2,103);
+    ctx.restore();
+    newGullFlash--;
+  }
+
+  // Time bonus flash
+  if(timeBonusFlash>0){
+    ctx.save();
+    ctx.globalAlpha=Math.min(1,timeBonusFlash/25)*Math.min(1,(timeBonusFlash/100)*2);
+    ctx.shadowBlur=14; ctx.shadowColor='#00b894';
+    ctx.fillStyle='#55efc4'; ctx.font='700 20px Nunito'; ctx.textAlign='center';
+    ctx.fillText(`⏱ +${DIFF[difficulty].timeBonus} SECONDS!`, W/2, newGullFlash>0 ? 127 : 103);
+    ctx.restore();
+    timeBonusFlash--;
+  }
+
+  // Stage unlock banner
+  if(stageUnlockBanner>0){
+    const alpha=Math.min(1,stageUnlockBanner/40)*Math.min(1,(stageUnlockBanner)/180);
+    ctx.save(); ctx.globalAlpha=alpha;
+    fillRR(W/2-210,H_BASE/2-40,420,80,12,'rgba(0,0,0,0.72)');
+    const bannerCol = stage>=4 ? '#00b894' : stage>=3 ? '#fd79a8' : '#a29bfe';
+    ctx.strokeStyle=bannerCol; ctx.lineWidth=2;
+    ctx.beginPath(); rrPath(W/2-210,H_BASE/2-40,420,80,12); ctx.stroke();
+    ctx.shadowBlur=20; ctx.shadowColor=bannerCol;
+    ctx.fillStyle=bannerCol; ctx.font='700 15px Nunito'; ctx.textAlign='center';
+    ctx.fillText('FLOCK REACHED CRITICAL SIZE!',W/2,H_BASE/2-14);
+    ctx.fillStyle='#fff'; ctx.font='28px Bangers';
+    const bannerText = stage>=4 ? '⚓  HARBOR UNLOCKED  🦈' : stage>=3 ? '🚗  ROAD ZONE UNLOCKED  🚔' : '🏙️  PROMENADE UNLOCKED  🏙️';
+    ctx.fillText(bannerText,W/2,H_BASE/2+22);
+    ctx.shadowBlur=0;
+    ctx.fillStyle='rgba(255,255,255,0.5)'; ctx.font='700 11px Nunito';
+    const bannerSub = stage>=4 ? '+40 seconds · 🦈 beware of sharks!' : stage>=3 ? '+30 seconds · 🚗 watch out for cars!' : '+30 seconds · 🚔 beware of police!';
+    ctx.fillText(bannerSub,W/2,H_BASE/2+42);
+    ctx.restore(); stageUnlockBanner--;
+  }
+
+  // Score multiplier indicator
+  if(scoreMultiplier>1){
+    const pulse=0.85+Math.sin(frame*0.15)*0.15;
+    ctx.save(); ctx.globalAlpha=pulse;
+    ctx.shadowBlur=12; ctx.shadowColor='#ffd700';
+    ctx.fillStyle='#ffd700'; ctx.font='700 13px Nunito'; ctx.textAlign='center';
+    ctx.fillText('⭐ 2× CHAOS MULTIPLIER — '+Math.ceil(multiplierTimer/60)+'s remaining',W/2,100);
+    ctx.restore();
+  }
+
+  drawNewsTicker();
+}
+
+// ── NEWS TICKER ────────────────────────────────────────────
+const TICKER_POOL = {
+  calm:[
+    'Local forecast: sunny skies and light sea breezes through the weekend.',
+    'City council approves promenade renovation. Work begins next spring.',
+    'Reminder: beach parking meters enforced 8am–8pm daily.',
+    'Community event: sandcastle competition Saturday at noon. All welcome.',
+  ],
+  alert:[
+    '⚠ Unusual seagull activity reported near the beachfront. Secure your snacks.',
+    '⚠ Parks dept advisory: elevated bird presence on the promenade. Use caution.',
+    '⚠ Local businesses report disruption from seagull congregation. Officials monitoring.',
+  ],
+  breaking:[
+    '🔴 BREAKING: Seagull swarm causes panic along Main Street Promenade.',
+    '🔴 BREAKING: Eyewitness — "They just descended. Like a screaming chip-hungry cloud."',
+    '🔴 BREAKING: Multiple promenade businesses temporarily closed due to bird activity.',
+    '🔴 Police on scene. Officers urge calm. Birds reportedly "not responding to de-escalation."',
+  ],
+  emergency:[
+    '🚨 EMERGENCY: City declares state of avian emergency. Evacuation in progress.',
+    '🚨 Mayor reportedly surrounded by birds. Whereabouts unknown. Press conference cancelled.',
+    '🚨 Military consulted on seagull situation. Generals "deeply concerned."',
+    '🚨 Road closures in effect downtown. Seagulls taking no questions at this time.',
+  ],
+  apocalypse:[
+    '💀 SQUAWKPOCALYPSE IN PROGRESS. ALL UNITS RESPOND. GOD HELP US.',
+    '💀 WEATHER: 🦅 GULL FORCE WINDS. ZERO VISIBILITY. THE SKY IS MADE OF BIRDS.',
+    '💀 THIS IS NOT A DRILL. SEAGULLS HAVE TAKEN CITY HALL. SEND CHIPS.',
+    '💀 MAYOR SPOTTED: Now distributing chips willingly. Has joined the flock.',
+    '💀 WEATHER UPDATE: ☀️ SUNNY with a 100% chance of SEAGULLS.',
+  ],
+};
+
+function getWeather() {
+  if(gulls.length>200) return '🦅 GULL FORCE WINDS';
+  if(gulls.length>100) return '🐦 GULL ALERT';
+  if(gulls.length>40)  return '🌤️ PARTLY CLOUDY';
+  return '☀️ SUNNY';
+}
+function getTickerPool() {
+  const n=gulls.length;
+  if(n>200) return TICKER_POOL.apocalypse;
+  if(n>100) return TICKER_POOL.emergency;
+  if(n>50)  return TICKER_POOL.breaking;
+  if(n>20)  return TICKER_POOL.alert;
+  return TICKER_POOL.calm;
+}
+
+function drawNewsTicker() {
+  const tickerH=18, tickerY=H-tickerH;  // follows bottom of canvas
+  // Background bar
+  ctx.fillStyle='rgba(0,0,0,0.72)'; ctx.fillRect(0,tickerY,W,tickerH);
+  // Left label
+  ctx.fillStyle='#e74c3c'; ctx.fillRect(0,tickerY,58,tickerH);
+  ctx.fillStyle='#fff'; ctx.font='700 10px Nunito'; ctx.textAlign='center';
+  ctx.fillText('LIVE NEWS',29,tickerY+12);
+  // Weather right
+  const wx=W-90;
+  ctx.fillStyle='rgba(255,255,255,0.12)'; ctx.fillRect(wx,tickerY,90,tickerH);
+  ctx.fillStyle='#ffeaa7'; ctx.font='700 9px Nunito'; ctx.textAlign='center';
+  ctx.fillText(getWeather(),wx+45,tickerY+12);
+
+  // Pick/rotate headline
+  newsMsgTimer--;
+  if(newsMsgTimer<=0 || newsMsg===''){
+    const pool=getTickerPool();
+    newsMsg=pool[Math.floor(Math.random()*pool.length)]+'    ';
+    newsScrollX=W; newsMsgTimer=600;
+  }
+  // Scroll it
+  newsScrollX-=1.4;
+  ctx.save();
+  ctx.beginPath(); ctx.rect(60,tickerY,wx-62,tickerH); ctx.clip();
+  ctx.fillStyle = gulls.length>100 ? '#ff6b6b' : gulls.length>50 ? '#ffeaa7' : '#fff';
+  ctx.font='700 10px Nunito'; ctx.textAlign='left';
+  // Measure text to reset when it scrolls off
+  const tw=ctx.measureText(newsMsg).width;
+  if(newsScrollX<-tw) newsScrollX=W;
+  ctx.fillText(newsMsg,newsScrollX,tickerY+12);
+  ctx.restore();
+}
+
+// ── MENU BIRDS ─────────────────────────────────────────────
+const menuBirds=Array.from({length:22},()=>({
+  x:rnd(0,W), y:rnd(0,H),
+  vx:rnd(0.4,1.2)*(Math.random()<0.5?1:-1), vy:rnd(-0.6,0.6),
+  sz:rnd(6,11), wp:rnd(0,Math.PI*2),
+}));
+
+function drawMenuBirds(){
+  for(const b of menuBirds){
+    b.x+=b.vx; b.y+=b.vy; b.wp+=0.15;
+    if(b.x>W+30)b.x=-30; if(b.x<-30)b.x=W+30;
+    if(b.y>H+30)b.y=-30; if(b.y<-30)b.y=H+30;
+    const wb=Math.sin(b.wp)*0.28, s=b.sz;
+    const ang=Math.atan2(b.vy,b.vx);
+    ctx.save(); ctx.translate(b.x,b.y); ctx.rotate(ang+Math.PI/2);
+    ctx.fillStyle='rgba(255,255,255,0.88)';
+    ctx.beginPath(); ctx.ellipse(0,0,s*0.37,s*0.72,0,0,Math.PI*2); ctx.fill();
+    const lw=s*(1.1+wb);
+    ctx.beginPath(); ctx.moveTo(-s*0.22,-s*0.1); ctx.quadraticCurveTo(-lw,-s*0.42,-lw*0.65,s*0.5); ctx.lineTo(-s*0.22,s*0.28); ctx.closePath(); ctx.fill();
+    const rw=s*(1.1-wb);
+    ctx.beginPath(); ctx.moveTo(s*0.22,-s*0.1); ctx.quadraticCurveTo(rw,-s*0.42,rw*0.65,s*0.5); ctx.lineTo(s*0.22,s*0.28); ctx.closePath(); ctx.fill();
+    ctx.restore();
+  }
+}
+function drawMenuCloud(cx,cy,sc){
+  ctx.save(); ctx.translate(cx,cy); ctx.scale(sc,sc);
+  ctx.fillStyle='rgba(255,255,255,0.88)';
+  [[0,0,26],[30,-10,20],[60,4,23],[20,10,18],[48,12,17]].forEach(([x,y,r])=>{
+    ctx.beginPath(); ctx.arc(x,y,r,0,Math.PI*2); ctx.fill();
+  });
+  ctx.restore();
+}
+
+// ── MENU BUTTONS ───────────────────────────────────────────
+const MENU_BTNS={
+  easy:         {x:W/2-258,y:330,w:142,h:54},
+  normal:       {x:W/2- 71,y:330,w:142,h:54},
+  hard:         {x:W/2+116,y:330,w:142,h:54},
+  play:         {x:W/2-110,y:416,w:220,h:58},
+  tutorial:     {x:W/2+122,y:416,w:126,h:58},
+  achievements: {x:W/2-248,y:416,w:126,h:58},
+};
+const DIFF_LABELS={
+  easy:  {label:'EASY',  sub:'Fewer Hazards · +20s Bonuses', mult:'×0.5 Score', col:'#00b894'},
+  normal:{label:'NORMAL',sub:'Standard · +15s Bonuses',      mult:'×1.0 Score', col:'#fdcb6e'},
+  hard:  {label:'HARD',  sub:'Max Hazards · +10s Bonuses',   mult:'×2.5 Score', col:'#d63031'},
+};
+
+function drawMenu(){
+  const bg=ctx.createLinearGradient(0,0,0,H);
+  bg.addColorStop(0,'#4a90d9'); bg.addColorStop(0.55,'#a29bfe'); bg.addColorStop(1,'#fd79a8');
+  ctx.fillStyle=bg; ctx.fillRect(0,0,W,H);
+  ctx.shadowBlur=50; ctx.shadowColor='#ffeaa7';
+  ctx.fillStyle='#ffeaa7'; ctx.beginPath(); ctx.arc(W*0.82,H*0.14,47,0,Math.PI*2); ctx.fill();
+  ctx.shadowBlur=0;
+  drawMenuCloud(88,68,1.2); drawMenuCloud(415,55,0.9); drawMenuCloud(678,88,1.0);
+  ctx.fillStyle='#1a7fc4';
+  ctx.beginPath(); ctx.moveTo(0,H-118);
+  for(let x=0;x<=W;x+=12) ctx.lineTo(x,H-118+Math.sin(x*0.025+frame*0.03)*13);
+  ctx.lineTo(W,H); ctx.lineTo(0,H); ctx.closePath(); ctx.fill();
+  const bc=ctx.createLinearGradient(0,H-130,0,H);
+  bc.addColorStop(0,'#f9ca24'); bc.addColorStop(1,'#f0932b');
+  ctx.fillStyle=bc; ctx.fillRect(0,H-130,W,130);
+  drawMenuBirds();
+  ctx.textAlign='center';
+  // Title — outlined for readability
+  ctx.font='78px Bangers';
+  ctx.strokeStyle='rgba(0,0,0,0.45)'; ctx.lineWidth=6; ctx.lineJoin='round';
+  ctx.strokeText('SQUAWKPOCALYPSE',W/2,161);
+  const tg=ctx.createLinearGradient(0,85,0,168);
+  tg.addColorStop(0,'#ffffff'); tg.addColorStop(1,'#ffeaa7');
+  ctx.fillStyle=tg;
+  ctx.fillText('SQUAWKPOCALYPSE',W/2,161);
+  ctx.strokeStyle='rgba(0,0,0,0.0)';  // reset stroke
+  ctx.fillStyle='rgba(255,255,255,0.82)'; ctx.font='700 17px Nunito';
+  ctx.fillText('Grow your flock. Drop chips. Cause absolute chaos.',W/2,196);
+  ctx.fillStyle='rgba(255,255,255,0.72)'; ctx.font='700 14px Nunito';
+  ctx.fillText('— SELECT DIFFICULTY —',W/2,320);
+  for(const [key,cfg] of Object.entries(DIFF_LABELS)){
+    const b=MENU_BTNS[key], sel=difficulty===key;
+    const cx=b.x+b.w/2;
+    ctx.save();
+    if(sel){ctx.shadowBlur=18; ctx.shadowColor=cfg.col;}
+    fillRR(b.x,b.y,b.w,b.h,9,sel?cfg.col:'rgba(255,255,255,0.18)');
+    if(sel){ctx.strokeStyle='rgba(0,0,0,0.3)';ctx.lineWidth=2;ctx.beginPath();rrPath(b.x,b.y,b.w,b.h,9);ctx.stroke();}
+    ctx.shadowBlur=0; ctx.textAlign='center';
+    // Difficulty name
+    ctx.font='16px Bangers';
+    if(ctx.letterSpacing!==undefined) ctx.letterSpacing='2px';
+    ctx.strokeStyle='rgba(0,0,0,0.6)'; ctx.lineWidth=3; ctx.lineJoin='round';
+    ctx.strokeText(cfg.label,cx,b.y+17);
+    ctx.fillStyle='#fff'; ctx.fillText(cfg.label,cx,b.y+17);
+    if(ctx.letterSpacing!==undefined) ctx.letterSpacing='0px';
+    // Sub — hazards/bonus, small with shadow
+    ctx.shadowBlur=2; ctx.shadowColor='rgba(0,0,0,0.7)';
+    ctx.fillStyle=sel?'rgba(255,255,255,0.95)':'rgba(255,255,255,0.72)';
+    ctx.font='8px Nunito';
+    ctx.fillText(cfg.sub,cx,b.y+29);
+    // Multiplier — slightly bigger, visually important
+    ctx.font=sel?'700 12px Nunito':'700 11px Nunito';
+    ctx.fillStyle='#fff';
+    ctx.fillText(cfg.mult,cx,b.y+44);
+    ctx.shadowBlur=0;
+    // Best score below button
+    const db=bestScores[key];
+    if(db>0){
+      ctx.fillStyle=sel?'#ffeaa7':'rgba(255,255,255,0.4)';
+      ctx.font='700 10px Nunito';
+      ctx.fillText('⭐ '+db,cx,b.y+b.h+14);
+    }
+    ctx.restore();
+  }
+  const pb=MENU_BTNS.play, pulse=1+Math.sin(frame*0.055)*0.025;
+  ctx.save();
+  ctx.translate(pb.x+pb.w/2,pb.y+pb.h/2); ctx.scale(pulse,pulse);
+  ctx.shadowBlur=25; ctx.shadowColor='#e17055';
+  const pg=ctx.createLinearGradient(-pb.w/2,0,pb.w/2,0);
+  pg.addColorStop(0,'#e17055'); pg.addColorStop(1,'#d63031');
+  fillRR(-pb.w/2,-pb.h/2,pb.w,pb.h,12,pg);
+  ctx.shadowBlur=0;
+  ctx.font='20px Bangers'; ctx.textAlign='center';
+  if(ctx.letterSpacing!==undefined) ctx.letterSpacing='1px';
+  ctx.strokeStyle='rgba(0,0,0,0.45)'; ctx.lineWidth=3; ctx.lineJoin='round';
+  ctx.strokeText('🦅  UNLEASH THE FLOCK',0,9);
+  ctx.fillStyle='#fff'; ctx.fillText('🦅  UNLEASH THE FLOCK',0,9);
+  if(ctx.letterSpacing!==undefined) ctx.letterSpacing='0px';
+  ctx.restore();
+  // Achievements button — left of play
+  const ab=MENU_BTNS.achievements;
+  ctx.save();
+  ctx.shadowBlur=10; ctx.shadowColor='rgba(0,0,0,0.4)';
+  fillRR(ab.x,ab.y,ab.w,ab.h,12,'rgba(0,0,0,0.45)');
+  ctx.strokeStyle='rgba(255,215,0,0.55)'; ctx.lineWidth=2;
+  ctx.beginPath(); rrPath(ab.x,ab.y,ab.w,ab.h,12); ctx.stroke();
+  ctx.shadowBlur=0;
+  ctx.font='16px Bangers'; ctx.textAlign='center';
+  if(ctx.letterSpacing!==undefined) ctx.letterSpacing='1px';
+  ctx.strokeStyle='rgba(0,0,0,0.6)'; ctx.lineWidth=3; ctx.lineJoin='round';
+  ctx.strokeText('🏆  AWARDS',ab.x+ab.w/2,ab.y+24);
+  ctx.fillStyle='#ffd700'; ctx.fillText('🏆  AWARDS',ab.x+ab.w/2,ab.y+24);
+  ctx.fillStyle='rgba(255,255,255,0.6)'; ctx.font='10px Nunito';
+  ctx.shadowBlur=2; ctx.shadowColor='rgba(0,0,0,0.8)';
+  ctx.fillText(unlockedAch.size+'/'+ACH.length+' unlocked',ab.x+ab.w/2,ab.y+40);
+  ctx.shadowBlur=0;
+  if(ctx.letterSpacing!==undefined) ctx.letterSpacing='0px';
+  ctx.restore();
+  const tb=MENU_BTNS.tutorial;
+  ctx.save();
+  ctx.shadowBlur=10; ctx.shadowColor='rgba(0,0,0,0.4)';
+  fillRR(tb.x,tb.y,tb.w,tb.h,12,'rgba(0,0,0,0.45)');
+  ctx.strokeStyle='rgba(162,155,254,0.55)'; ctx.lineWidth=2;
+  ctx.beginPath(); rrPath(tb.x,tb.y,tb.w,tb.h,12); ctx.stroke();
+  ctx.shadowBlur=0;
+  ctx.font='16px Bangers'; ctx.textAlign='center';
+  if(ctx.letterSpacing!==undefined) ctx.letterSpacing='1px';
+  ctx.strokeStyle='rgba(0,0,0,0.6)'; ctx.lineWidth=3; ctx.lineJoin='round';
+  ctx.strokeText('❓  HOW TO PLAY',tb.x+tb.w/2,tb.y+24);
+  ctx.fillStyle='#fff'; ctx.fillText('❓  HOW TO PLAY',tb.x+tb.w/2,tb.y+24);
+  ctx.fillStyle='rgba(255,255,255,0.65)'; ctx.font='10px Nunito';
+  ctx.shadowBlur=2; ctx.shadowColor='rgba(0,0,0,0.8)';
+  ctx.fillText('mechanics & tips',tb.x+tb.w/2,tb.y+40);
+  ctx.shadowBlur=0;
+  if(ctx.letterSpacing!==undefined) ctx.letterSpacing='0px';
+  ctx.restore();
+  const hintY=H-20, hintTxt='🦅  Bigger flock = more chaos  ·  Reach 25 gulls to unlock the Promenade  ·  Surprises await  🦅';
+  ctx.font='12px Nunito'; ctx.textAlign='center';
+  const hintW=ctx.measureText(hintTxt).width+24;
+  fillRR(W/2-hintW/2, hintY-14, hintW, 18, 9, 'rgba(0,0,0,0.42)');
+  ctx.fillStyle='rgba(255,255,255,0.72)';
+  ctx.fillText(hintTxt,W/2,hintY);
+}
+
+// ── TUTORIAL ────────────────────────────────────────────────
+function drawTutorial() {
+  const bg=ctx.createLinearGradient(0,0,0,H_BASE);
+  bg.addColorStop(0,'#2d3436'); bg.addColorStop(1,'#1e272e');
+  ctx.fillStyle=bg; ctx.fillRect(0,0,W,H_BASE);
+  // Seagull mascot
+  ctx.save(); ctx.translate(W-70,55);
+  ctx.fillStyle='#f0f0f0';
+  ctx.beginPath(); ctx.ellipse(0,0,12,20,0,0,Math.PI*2); ctx.fill();
+  const lw2=34;
+  ctx.beginPath(); ctx.moveTo(-8,-3); ctx.quadraticCurveTo(-lw2,-14,-lw2*0.6,16); ctx.lineTo(-8,9); ctx.closePath(); ctx.fill();
+  ctx.beginPath(); ctx.moveTo( 8,-3); ctx.quadraticCurveTo( lw2,-14, lw2*0.6,16); ctx.lineTo( 8,9); ctx.closePath(); ctx.fill();
+  ctx.fillStyle='#f0a020'; ctx.beginPath(); ctx.moveTo(-3,-22); ctx.lineTo(3,-22); ctx.lineTo(0,-30); ctx.closePath(); ctx.fill();
+  ctx.fillStyle='#111'; ctx.beginPath(); ctx.arc(3,-6,2,0,Math.PI*2); ctx.fill();
+  ctx.restore();
+
+  ctx.textAlign='center';
+  ctx.font='42px Bangers';
+  ctx.strokeStyle='rgba(0,0,0,0.5)'; ctx.lineWidth=4; ctx.lineJoin='round';
+  ctx.strokeText('HOW TO PLAY',W/2,52);
+  ctx.fillStyle='#ffeaa7'; ctx.fillText('HOW TO PLAY',W/2,52);
+
+  const TIPS=[
+    {icon:'🍟',head:'Chip Lures',         body:'Click to drop a chip — your flock immediately launches toward it. Chips recharge over time. 3 max.'},
+    {icon:'🦅',head:'Grow Your Flock',    body:'Scaring beachgoers fills the Growth Meter. Full meter = new gull arrives from the sea.'},
+    {icon:'😱',head:'Cause Chaos',        body:'Bigger flocks = more score per NPC. Trap groups inside your flock for chain reactions!'},
+    {icon:'⏱',head:'Time',              body:'You start with 90 seconds. Each new stage adds +30s. Scoring adds bonus time — Easy gets more than Hard.'},
+    {icon:'🐕',head:'Dog Walkers',        body:'Dogs scatter your flock on contact. Their path curves toward your birds — plan accordingly.'},
+    {icon:'🚔',head:'Police Officers',    body:'Police drain your timer while gulls are inside their radius. Avoid their patrol zone!'},
+    {icon:'🚗',head:'Road Zone',          body:'Unlocks at 75 gulls. Cars cross the road and kill on contact. Keep your flock moving!'},
+    {icon:'🦈',head:'Harbor',             body:'Unlocks at 150 gulls. Sharks eat low-flying gulls. Use your flock to sink boats for big score!'},
+  ];
+
+  const cw=W/2-32;
+  for(let i=0;i<TIPS.length;i++){
+    const col=i%2, row=Math.floor(i/2);
+    const tx=(col===0?W/2-cw-8:W/2+8), ty=82+row*96;
+    fillRR(tx,ty,cw,84,8,'rgba(255,255,255,0.06)');
+    ctx.strokeStyle='rgba(255,255,255,0.1)'; ctx.lineWidth=1;
+    ctx.beginPath(); rrPath(tx,ty,cw,84,8); ctx.stroke();
+    ctx.font='22px sans-serif'; ctx.textAlign='left';
+    ctx.fillText(TIPS[i].icon,tx+12,ty+32);
+    ctx.fillStyle='#ffeaa7'; ctx.font='700 13px Nunito';
+    ctx.fillText(TIPS[i].head,tx+44,ty+24);
+    ctx.fillStyle='rgba(255,255,255,0.65)'; ctx.font='11px Nunito';
+    const words=TIPS[i].body.split(' '); let line='', ly=ty+40;
+    for(const wd of words){
+      const test=line+wd+' ';
+      if(ctx.measureText(test).width>cw-52&&line){ctx.fillText(line.trim(),tx+44,ly);line=wd+' ';ly+=15;}
+      else line=test;
+    }
+    ctx.fillText(line.trim(),tx+44,ly);
+  }
+
+  // Back button
+  ctx.save();
+  ctx.shadowBlur=14; ctx.shadowColor='#a29bfe';
+  fillRR(W/2-80,H_BASE-55,160,40,10,'#6c5ce7');
+  ctx.shadowBlur=0; ctx.font='16px Bangers'; ctx.textAlign='center';
+  if(ctx.letterSpacing!==undefined) ctx.letterSpacing='1px';
+  ctx.strokeStyle='rgba(0,0,0,0.4)'; ctx.lineWidth=2; ctx.lineJoin='round';
+  ctx.strokeText('← BACK TO MENU',W/2,H_BASE-29);
+  ctx.fillStyle='#fff'; ctx.fillText('← BACK TO MENU',W/2,H_BASE-29);
+  if(ctx.letterSpacing!==undefined) ctx.letterSpacing='0px';
+  ctx.restore();
+}
+
+function drawGameOver(){
+  saveBest();
+  ctx.fillStyle='rgba(0,0,0,0.72)'; ctx.fillRect(0,0,W,H);
+  ctx.textAlign='center';
+  // Title
+  ctx.fillStyle='#fd79a8'; ctx.font='64px Bangers';
+  ctx.strokeStyle='rgba(0,0,0,0.4)'; ctx.lineWidth=5; ctx.lineJoin='round';
+  ctx.strokeText('BEACH CHAOS COMPLETE!',W/2,115);
+  ctx.fillText('BEACH CHAOS COMPLETE!',W/2,115);
+
+  const diffMult=DIFF[difficulty].scoreMult;
+  const finalScore=Math.floor(score*diffMult);
+  const hasMultLine=(diffMult!==1.0);
+
+  fillRR(W/2-180,128,360,hasMultLine?185:155,12,'rgba(255,255,255,0.07)');
+
+  if(hasMultLine){
+    ctx.fillStyle='rgba(255,255,255,0.5)'; ctx.font='700 12px Nunito';
+    ctx.fillText('RAW SCORE',W/2,148);
+    ctx.fillStyle='rgba(255,255,255,0.6)'; ctx.font='20px Bangers';
+    ctx.fillText(Math.floor(score),W/2,170);
+    ctx.fillStyle='rgba(255,255,255,0.4)'; ctx.font='700 12px Nunito';
+    ctx.fillText(`× ${diffMult} (${difficulty.toUpperCase()}) =`,W/2,188);
+  }
+  // Final score — big
+  ctx.fillStyle='#ffeaa7'; ctx.font='68px Bangers';
+  ctx.shadowBlur=18; ctx.shadowColor='rgba(255,220,100,0.4)';
+  ctx.fillText(finalScore, W/2, hasMultLine ? 248 : 218);
+  ctx.shadowBlur=0;
+
+  // Rating — directly below final score, no overlap
+  const ratingY = hasMultLine ? 270 : 240;
+  const s=finalScore;
+  let rtxt,rcol;
+  if     (s>=50000){rtxt='🦅 SQUAWKPOCALYPSE';            rcol='#ffd700';}
+  else if(s>=20000){rtxt='🦅 ABSOLUTE SQUAWKPOCALYPSE';   rcol='#e17055';}
+  else if(s>=10000){rtxt='💥 TOTAL BEACH MAYHEM';         rcol='#fd79a8';}
+  else if(s>= 2000){rtxt='🌊 SIGNIFICANT DISTURBANCE';   rcol='#fdcb6e';}
+  else if(s>=  700){rtxt='🚨 NOTABLE INCIDENT';          rcol='#00b894';}
+  else if(s>=  200){rtxt='😤 MILD NUISANCE';             rcol='#74b9ff';}
+  else             {rtxt='🐦 BARELY A BIRDY';            rcol='#a29bfe';}
+  ctx.fillStyle=rcol; ctx.font='700 18px Nunito'; ctx.fillText(rtxt,W/2,ratingY);
+
+  ctx.fillStyle='rgba(255,255,255,0.5)'; ctx.font='700 14px Nunito';
+  ctx.fillText('Final flock: '+gulls.length+' seagulls',W/2,ratingY+22);
+
+  // Run stats
+  ctx.fillStyle='rgba(255,255,255,0.32)'; ctx.font='700 11px Nunito';
+  const stats=[
+    '🪦 '+statGullsKilled+' gulls',
+    '🚔 '+runPoliceOverwhelmed+' cops',
+    '🚗 '+runCarCrashes+' crashes',
+    '⚓ '+runBoatsSunk+' boats',
+    '📺 '+runNewsVans+' vans',
+  ];
+  ctx.fillText(stats.join('   '),W/2,ratingY+40);
+
+  // Best score
+  const thisScore=Math.floor(score);
+  const isNew = bestScore===thisScore && thisScore>0;
+  ctx.fillStyle = isNew ? '#ffd700' : 'rgba(255,255,255,0.38)';
+  ctx.font='700 12px Nunito';
+  if (isNew) { ctx.fillText('⭐ NEW BEST: '+finalScore, W/2, ratingY+58); }
+  else if (bestScore>0) { ctx.fillText('Your best: '+bestScore, W/2, ratingY+58); }
+
+  ctx.shadowBlur=18; ctx.shadowColor='#00b894';
+  fillRR(W/2-188,ratingY+70,168,48,10,'#00b894');
+  ctx.shadowBlur=0; ctx.font='18px Bangers'; ctx.textAlign='center';
+  if(ctx.letterSpacing!==undefined) ctx.letterSpacing='1px';
+  ctx.strokeStyle='rgba(0,0,0,0.5)'; ctx.lineWidth=3; ctx.lineJoin='round';
+  ctx.strokeText('▶  PLAY AGAIN',W/2-104,ratingY+100);
+  ctx.fillStyle='#fff'; ctx.fillText('▶  PLAY AGAIN',W/2-104,ratingY+100);
+  ctx.shadowBlur=18; ctx.shadowColor='#6c5ce7';
+  fillRR(W/2+20,ratingY+70,168,48,10,'#6c5ce7');
+  ctx.shadowBlur=0;
+  ctx.strokeText('⬡  MAIN MENU',W/2+104,ratingY+100);
+  ctx.fillStyle='#fff'; ctx.fillText('⬡  MAIN MENU',W/2+104,ratingY+100);
+  if(ctx.letterSpacing!==undefined) ctx.letterSpacing='0px';
+  ctx.fillStyle='rgba(255,255,255,0.28)'; ctx.font='12px Nunito';
+  ctx.fillText('Tip: change difficulty on the main menu!',W/2,ratingY+134);
+}
+
+// ── AUDIO ──────────────────────────────────────────────────
+// All sounds synthesized via Web Audio — no external files needed.
+let _ac=null;
+function ac(){
+  if(!_ac){try{_ac=new(window.AudioContext||window.webkitAudioContext)();}catch(e){}}
+  return _ac;
+}
+// Resume on any click (browser autoplay policy)
+canvas.addEventListener('click',()=>{const a=ac();if(a&&a.state==='suspended')a.resume();});
+
+// Rate-limit counters (frames)
+let squawkCooldown=0, deathCooldown=0, radioSound=0;
+
+// Helicopter persistent engine nodes
+let heliEngineGain=null, heliEngineOsc=null, heliEngineOsc2=null;
+
+function playSquawk(){
+  const a=ac(); if(!a||squawkCooldown>0) return;
+  squawkCooldown = gulls.length>200?18 : gulls.length>80?10 : gulls.length>30?6 : 3;
+  const now=a.currentTime, vol=Math.max(0.07, 0.28-gulls.length*0.0005);
+  // Sawtooth with rising-then-falling pitch — the scream synth WAS the seagull all along
+  const osc=a.createOscillator(), g=a.createGain();
+  osc.type='sawtooth';
+  osc.frequency.setValueAtTime(580+Math.random()*160, now);
+  osc.frequency.setValueAtTime(820+Math.random()*180, now+0.05);
+  osc.frequency.linearRampToValueAtTime(460+Math.random()*120, now+0.22);
+  g.gain.setValueAtTime(vol,now); g.gain.exponentialRampToValueAtTime(0.001,now+0.25);
+  osc.connect(g); g.connect(a.destination); osc.start(now); osc.stop(now+0.25);
+}
+
+function playDeathSquawk(){
+  const a=ac(); if(!a||deathCooldown>0) return;
+  deathCooldown=10;
+  const now=a.currentTime;
+  const osc=a.createOscillator(), g=a.createGain();
+  osc.type='sawtooth';
+  osc.frequency.setValueAtTime(760,now);
+  osc.frequency.setValueAtTime(400,now+0.04);
+  osc.frequency.linearRampToValueAtTime(160,now+0.14);
+  g.gain.setValueAtTime(0.2,now); g.gain.exponentialRampToValueAtTime(0.001,now+0.16);
+  osc.connect(g); g.connect(a.destination); osc.start(now); osc.stop(now+0.16);
+}
+
+function playChipEarned(){
+  const a=ac(); if(!a) return;
+  const now=a.currentTime;
+  // 8-bit ascending arpeggio — square wave, snappy
+  [330,440,660].forEach((freq,i)=>{
+    const g=a.createGain(), osc=a.createOscillator();
+    osc.type='square'; osc.frequency.value=freq;
+    osc.connect(g); g.connect(a.destination);
+    const t=now+i*0.055;
+    g.gain.setValueAtTime(0.12,t); g.gain.setValueAtTime(0.06,t+0.02);
+    g.gain.exponentialRampToValueAtTime(0.001,t+0.1);
+    osc.start(t); osc.stop(t+0.1);
+  });
+}
+
+function playCarCrash(){
+  const a=ac(); if(!a) return;
+  const now=a.currentTime;
+  // Punchy low thud with bit-crushed noise
+  const osc=a.createOscillator(), g=a.createGain();
+  osc.type='sawtooth';
+  osc.frequency.setValueAtTime(180,now); osc.frequency.setValueAtTime(60,now+0.02);
+  osc.frequency.linearRampToValueAtTime(28,now+0.28);
+  g.gain.setValueAtTime(0.7,now); g.gain.setValueAtTime(0.5,now+0.02);
+  g.gain.exponentialRampToValueAtTime(0.001,now+0.35);
+  osc.connect(g); g.connect(a.destination); osc.start(now); osc.stop(now+0.35);
+  _noiseShot(a,now,0.18,'lowpass',600,0.55);
+}
+
+function playBoatSink(){
+  const a=ac(); if(!a) return;
+  const now=a.currentTime;
+  // Resonant noise blups — high Q lowpass on a noise burst = "blup" character
+  for(let i=0;i<4;i++){
+    const t=now+i*0.16;
+    const bufSize=Math.ceil(a.sampleRate*0.06);
+    const buf=a.createBuffer(1,bufSize,a.sampleRate);
+    const data=buf.getChannelData(0);
+    for(let j=0;j<bufSize;j++) data[j]=(Math.random()*2-1)*Math.max(0,1-j/(bufSize*0.25));
+    const src=a.createBufferSource(); src.buffer=buf;
+    const flt=a.createBiquadFilter();
+    flt.type='lowpass';
+    flt.frequency.value=160-i*18;  // slightly descending pitch
+    flt.Q.value=22;  // very resonant = characteristic blup tone
+    const gn=a.createGain(); gn.gain.value=0.65;
+    src.connect(flt); flt.connect(gn); gn.connect(a.destination);
+    src.start(t);
+  }
+}
+
+function playNewsJingle(){
+  const a=ac(); if(!a) return;
+  const now=a.currentTime;
+  // 8-bit fanfare — square wave ascending
+  [262,330,392,523,659].forEach((freq,i)=>{
+    const g=a.createGain(), osc=a.createOscillator();
+    osc.type='square'; osc.frequency.value=freq;
+    osc.connect(g); g.connect(a.destination);
+    const t=now+i*0.075;
+    g.gain.setValueAtTime(0.14,t); g.gain.setValueAtTime(0.08,t+0.03);
+    g.gain.exponentialRampToValueAtTime(0.001,t+0.16);
+    osc.start(t); osc.stop(t+0.16);
+  });
+}
+
+function playPoliceRadio(){
+  const a=ac(); if(!a||radioSound>0) return;
+  radioSound=120;
+  const now=a.currentTime;
+  // Crunchy bandpass noise — walkie-talkie crackle
+  _noiseShot(a,now,0.28,'bandpass',1600,0.18);
+  // Quick tone blip like radio beep
+  const osc=a.createOscillator(), g=a.createGain();
+  osc.type='square'; osc.frequency.value=1200;
+  g.gain.setValueAtTime(0.08,now+0.18); g.gain.exponentialRampToValueAtTime(0.001,now+0.28);
+  osc.connect(g); g.connect(a.destination); osc.start(now+0.18); osc.stop(now+0.28);
+}
+
+function startHeliEngine(){
+  const a=ac(); if(!a) return;
+  stopHeliEngine();
+  heliEngineGain=a.createGain(); heliEngineGain.gain.value=0;
+  heliEngineGain.connect(a.destination);
+  // Low chopper rumble
+  heliEngineOsc=a.createOscillator();
+  heliEngineOsc.type='sawtooth'; heliEngineOsc.frequency.value=18;
+  const flt=a.createBiquadFilter(); flt.type='lowpass'; flt.frequency.value=220;
+  heliEngineOsc.connect(flt); flt.connect(heliEngineGain);
+  // Rhythmic blade whomp
+  heliEngineOsc2=a.createOscillator();
+  heliEngineOsc2.type='square'; heliEngineOsc2.frequency.value=9;
+  const g2=a.createGain(); g2.gain.value=0.35;
+  heliEngineOsc2.connect(g2); g2.connect(heliEngineGain);
+  heliEngineOsc.start(); heliEngineOsc2.start();
+  heliEngineGain.gain.linearRampToValueAtTime(0.22, a.currentTime+1.5);
+}
+
+function stopHeliEngine(){
+  if(!heliEngineGain) return;
+  const a=ac(); if(!a) return;
+  try{
+    heliEngineGain.gain.linearRampToValueAtTime(0,a.currentTime+0.6);
+    const g=heliEngineGain, o1=heliEngineOsc, o2=heliEngineOsc2;
+    setTimeout(()=>{try{o1.stop();o2.stop();}catch(e){}},700);
+  }catch(e){}
+  heliEngineGain=null; heliEngineOsc=null; heliEngineOsc2=null;
+}
+
+function playHeliCrash(){
+  stopHeliEngine();
+  const a=ac(); if(!a) return;
+  const now=a.currentTime;
+  // Descending pitch + low boom
+  const osc=a.createOscillator(), g=a.createGain();
+  osc.frequency.setValueAtTime(220,now); osc.frequency.linearRampToValueAtTime(28,now+1.1);
+  g.gain.setValueAtTime(0.55,now); g.gain.exponentialRampToValueAtTime(0.001,now+1.3);
+  osc.connect(g); g.connect(a.destination); osc.start(now); osc.stop(now+1.3);
+  // Heavy noise burst
+  _noiseShot(a, now, 1.2, 'lowpass', 350, 0.75);
+}
+
+// Internal helper — fire a noise burst
+function _noiseShot(a, now, dur, filterType, filterFreq, vol){
+  const bufSize=Math.ceil(a.sampleRate*dur);
+  const buf=a.createBuffer(1,bufSize,a.sampleRate);
+  const data=buf.getChannelData(0);
+  for(let i=0;i<bufSize;i++) data[i]=(Math.random()*2-1)*Math.max(0,1-i/bufSize);
+  const src=a.createBufferSource();
+  src.buffer=buf;
+  const flt=a.createBiquadFilter(); flt.type=filterType; flt.frequency.value=filterFreq;
+  const gn=a.createGain(); gn.gain.value=vol;
+  src.connect(flt); flt.connect(gn); gn.connect(a.destination);
+  src.start(now);
+}
+
+// ── INIT ───────────────────────────────────────────────────
+function initGame(){
+  const cfg=DIFF[difficulty];
+  gulls=[]; npcs=[]; chips=[]; dogs=[]; particles=[];
+  cyclists=[]; diners=[]; foodDrops=[];
+  cars=[]; police=[]; pickups=[];
+  boats=[]; sharks=[];
+  helicopter=null; helicopterSpawned=false;
+  stopHeliEngine();
+  initWorldDamage();
+  runBoatsSunk=0; runCarCrashes=0; runPoliceOverwhelmed=0; runNewsVans=0; flockedWiped=false;
+  statGullsKilled=0;
+  score=0; growthMeter=0; newGullFlash=0;
+  chipCharges=CHIP_MAX; chipTimer=CHIP_RECHARGE;
+  gameTimer=cfg.secs; npcSpawnTimer=5;
+  cyclistSpawnTimer=220; dinerRespawnTimer=60;
+  carSpawnTimer=0; policeSpawnTimer=300; pickupSpawnTimer=1200;
+  boatSpawnTimer=0; sharkSpawnTimer=0;
+  policeRadioActive=false; policeTimerDrain=0;
+  scoreMultiplier=1; multiplierTimer=0; goldFlash=0;
+  newsScrollX=W; newsMsg=''; newsMsgTimer=0;
+  nextTimeMilestone=100; timeBonusFlash=0;
+  stage=1; stageTransition=false; stageTransitionFrame=0; stageUnlockBanner=0;
+  H=H_BASE; canvas.height=H; resize();
+
+  if(timerInterval) clearInterval(timerInterval);
+  timerInterval=setInterval(()=>{
+    if(state==='playing'){
+      gameTimer--;
+      if(gameTimer<=0){
+        gameTimer=0; saveBest(); state='gameover'; clearInterval(timerInterval);
+      }
+    }
+  },1000);
+
+  // Spawn starting flock — resting on the beach
+  for(let i=0;i<cfg.startGulls;i++){
+    const g=new Gull(W/2+rnd(-180,180), H/2+rnd(-100,100));
+    g.airborne=false; g.vx=0; g.vy=0;
+    gulls.push(g);
+  }
+  // NPCs will walk in from edges via npcSpawnTimer (no static spawn)
+}
+
+// ── INPUT ──────────────────────────────────────────────────
+canvas.addEventListener('click',e=>{
+  const rect=canvas.getBoundingClientRect();
+  const mx=(e.clientX-rect.left)*(W/rect.width);
+  const my=(e.clientY-rect.top)*(H/rect.height);
+
+  if(state==='menu'){
+    for(const key of ['easy','normal','hard']){
+      const b=MENU_BTNS[key];
+      if(mx>=b.x&&mx<=b.x+b.w&&my>=b.y&&my<=b.y+b.h){difficulty=key; return;}
+    }
+    const tb=MENU_BTNS.tutorial;
+    if(mx>=tb.x&&mx<=tb.x+tb.w&&my>=tb.y&&my<=tb.y+tb.h){state='tutorial'; return;}
+    const achb=MENU_BTNS.achievements;
+    if(mx>=achb.x&&mx<=achb.x+achb.w&&my>=achb.y&&my<=achb.y+achb.h){state='achievements'; return;}
+    const pb=MENU_BTNS.play;
+    if(mx>=pb.x&&mx<=pb.x+pb.w&&my>=pb.y&&my<=pb.y+pb.h){state='playing'; initGame();}
+    return;
+  }
+  if(state==='tutorial'||state==='achievements'){
+    if(mx>=W/2-80&&mx<=W/2+80&&my>=H_BASE-55&&my<=H_BASE-15){state='menu';}
+    return;
+  }
+  if(state==='playing'){
+    if(chipCharges>0){chips.push(new Chip(mx,my)); chipCharges--;}
+    return;
+  }
+  if(state==='gameover'){
+    const diffMult2=DIFF[difficulty].scoreMult;
+    const rY=diffMult2!==1?270:240;
+    const bY=rY+70;
+    if(mx>=W/2-188&&mx<=W/2-20&&my>=bY&&my<=bY+48){state='playing'; initGame();}
+    if(mx>=W/2+20&&mx<=W/2+188&&my>=bY&&my<=bY+48){
+      state='menu'; stopHeliEngine(); H=H_BASE; canvas.height=H; resize();
+    }
+  }
+});
+
+// ── MAIN LOOP ──────────────────────────────────────────────
+function loop(){
+  // Canvas resize must happen BEFORE clearRect — setting canvas.height mid-frame
+  // wipes everything drawn so far, causing the background-vanish bug.
+  if(state==='playing' && stageTransition){
+    stageTransitionFrame++;
+    const t=Math.min(stageTransitionFrame/150,1);
+    const ease=t<0.5?2*t*t:1-Math.pow(-2*t+2,2)/2;
+    const targetH=stage<=2?H_STAGE2:stage<=3?H_STAGE3:H_STAGE4;
+    const startH =stage<=2?H_BASE  :stage<=3?H_STAGE2:H_STAGE3;
+    const newH=Math.round(startH+(targetH-startH)*ease);
+    if(newH!==H){H=newH; canvas.height=H; resize();}
+    if(stageTransitionFrame>=150) stageTransition=false;
+  }
+
+  ctx.clearRect(0,0,W,H);
+  frame++;
+
+  if(state==='menu'){
+    drawMenu();
+  }else if(state==='tutorial'){
+    drawTutorial();
+  }else if(state==='achievements'){
+    drawAchievementScreen();
+
+  }else if(state==='playing'){
+    drawBackground();
+
+    chips=chips.filter(c=>c.update());
+
+    if(chipCharges<CHIP_MAX){
+      chipTimer--;
+      if(chipTimer<=0){ chipCharges++; chipTimer=CHIP_RECHARGE; playChipEarned(); }
+    }
+
+    // Chip eating: consumed when 2+ airborne gulls arrive
+    for (const chip of chips) {
+      if (chip.life <= 20) continue; // already fading, skip
+      let near=0;
+      for (const g of gulls) {
+        if (g.airborne && Math.hypot(g.x-chip.x,g.y-chip.y)<32) near++;
+      }
+      if (near >= 2) {
+        chip.life = 18; // trigger instant fade-out
+        // Crumb burst particles
+        for (let i=0;i<6;i++) {
+          const p=new Particle(chip.x+rnd(-18,18),chip.y+rnd(-12,12),1);
+          p.text=['✦','·','~','*'][Math.floor(rnd(0,4))];
+          p.col='#fdcb6e'; p.sz=rnd(8,13);
+          particles.push(p);
+        }
+      }
+    }
+
+    if(Math.random()<DIFF[difficulty].dogRate) dogs.push(new DogWalker());
+    dogs=dogs.filter(d=>{d.update(); return d.alive;});
+
+    for(const g of gulls) g.update();
+
+    // NPCs update — returns false to despawn (fled off-screen or left voluntarily)
+    npcs=npcs.filter(n=>n.update()!==false);
+
+    // Keep NPC population topped up — they walk in from edges
+    npcSpawnTimer--;
+    const npcCap = DIFF[difficulty].npcCount
+                 + (stage>=2 ? 6 : 0)
+                 + (stage>=3 ? 10 : 0)
+                 + (stage>=4 ? 18 : 0);
+    if (npcSpawnTimer<=0 && npcs.length<npcCap) {
+      spawnNPC();
+      npcSpawnTimer = npcs.length < Math.floor(npcCap*0.6) ? 55 : 320;
+    }
+
+    // ── Achievement: mega flock ───────────────────────────
+    if(gulls.length>=500) unlockAch('mega_flock');
+
+    // ── Flock wiped out: game ends early ─────────────────
+    if(gulls.length===0 && gameTimer>0){
+      flockedWiped=true;
+      gameTimer=0; saveBest(); state='gameover';
+      clearInterval(timerInterval);
+      unlockAch('last_squawk');
+    }
+
+    // ── Score milestone ───────────────────────────────────
+    if (score >= nextTimeMilestone) {
+      gameTimer = Math.min(gameTimer+DIFF[difficulty].timeBonus, 600);
+      nextTimeMilestone = Math.floor(nextTimeMilestone * 2.0);
+      timeBonusFlash = 100;
+    }
+
+    // ── Stage 2 entities: cyclists, diners, food drops, police ─
+    if (stage>=2) {
+      cyclistSpawnTimer--;
+      if (cyclistSpawnTimer<=0 && H>=H_STAGE2-20) {
+        cyclists.push(new Cyclist());
+        cyclistSpawnTimer=rnd(280,520)|0;
+      }
+      dinerRespawnTimer--;
+      if (dinerRespawnTimer<=0 && H>=H_STAGE2-20) {
+        for (const seat of DINER_SEATS) {
+          const occupied=diners.some(d=>Math.hypot(d.x-seat.x,d.y-seat.y)<30);
+          if (!occupied && Math.random()<0.5) diners.push(new Diner(seat));
+        }
+        dinerRespawnTimer=rnd(500,900)|0;
+      }
+      // Police patrol the promenade (stage 2 hazard)
+      policeSpawnTimer--;
+      if (policeSpawnTimer<=0 && H>=H_STAGE2-20 && police.length<3) {
+        police.push(new Police());
+        policeSpawnTimer=rnd(DIFF[difficulty].policeRate, DIFF[difficulty].policeRate*1.8)|0;
+      }
+      cyclists  =cyclists.filter(c=>{c.update(); return c.alive;});
+      diners    =diners.filter(d=>d.update()!==false);
+      foodDrops =foodDrops.filter(f=>f.update()!==false);
+      police    =police.filter(p=>{p.update(); return p.alive;});
+      const radioingCount=police.filter(p=>p.radioing).length;
+      policeRadioActive = radioingCount>0;
+      if (radioingCount>0) {
+        policeTimerDrain += radioingCount/60;
+        if (policeTimerDrain>=1) { policeTimerDrain--; gameTimer=Math.max(0,gameTimer-1); }
+      }
+    }
+
+    // ── Stage 3 entities: cars + golden lure pickup ───────
+    if (stage>=3) {
+      carSpawnTimer--;
+      if (carSpawnTimer<=0 && H>=H_STAGE3-20) {
+        cars.push(new Car());
+        carSpawnTimer=rnd(DIFF[difficulty].carRate, DIFF[difficulty].carRate*2.1)|0;
+      }
+      // News van — rare, unpredictable, auto-despawns
+      pickupSpawnTimer--;
+      if (pickupSpawnTimer<=0 && H>=H_STAGE3-20 && pickups.length===0) {
+        pickups.push(new NewsVan());
+        pickupSpawnTimer=rnd(2400,5400)|0;
+      }
+      cars   =cars.filter(c=>{c.update(); return c.alive;});
+      pickups=pickups.filter(p=>{p.update(); return p.alive;});
+    }
+
+    // ── Stage unlocks ─────────────────────────────────────
+    if (stage===1 && gulls.length>=STAGE2_FLOCK) {
+      stage=2; stageTransition=true; stageTransitionFrame=0;
+      stageUnlockBanner=220; gameTimer+=30;
+      cyclistSpawnTimer=300; dinerRespawnTimer=120; policeSpawnTimer=400;
+      triggerStage2Damage();
+    }
+    if (stage===2 && gulls.length>=STAGE3_FLOCK) {
+      stage=3; stageTransition=true; stageTransitionFrame=0;
+      stageUnlockBanner=220; gameTimer+=30;
+      carSpawnTimer=200; pickupSpawnTimer=1200;
+      triggerStage3Damage();
+    }
+    if (stage===3 && gulls.length>=STAGE4_FLOCK) {
+      stage=4; stageTransition=true; stageTransitionFrame=0;
+      stageUnlockBanner=220; gameTimer+=30;
+      boatSpawnTimer=300; sharkSpawnTimer=600;
+      triggerStage4Damage();
+    }
+
+    // ── Stage 4 entities: boats + sharks ─────────────────
+    if (stage>=4) {
+      boatSpawnTimer--;
+      if (boatSpawnTimer<=0 && H>=H_STAGE4-20) {
+        if (boats.length<4) boats.push(new Boat());
+        boatSpawnTimer=rnd(600,1100)|0;
+      }
+      sharkSpawnTimer--;
+      if (sharkSpawnTimer<=0 && H>=H_STAGE4-20 && sharks.length<DIFF[difficulty].sharkMax) {
+        sharks.push(new Shark());
+        sharkSpawnTimer=rnd(400,800)|0;
+      }
+      boats  =boats.filter(b=>{b.update(); return b.alive;});
+      sharks.forEach(s=>s.update());
+    }
+
+    // ── Audio cooldown ticks ──────────────────────────────
+    if(squawkCooldown>0) squawkCooldown--;
+    if(deathCooldown>0)  deathCooldown--;
+    if(radioSound>0)     radioSound--;
+
+    // ── Helicopter boss at 300 gulls ─────────────────────
+    if (!helicopterSpawned && gulls.length>=HELICOPTER_FLOCK) {
+      helicopterSpawned=true;
+      helicopter=new Helicopter();
+      startHeliEngine();
+      const p=new Particle(W/2,H_BASE/2,4);
+      p.text='🚁 HELICOPTER INCOMING!'; p.col='#ff4757'; p.sz=20;
+      p.vx=0; p.vy=0; p.dec=0.004; particles.push(p);
+    }
+    if (helicopter) {
+      // Speed up engine when tail broken
+      if(heliEngineOsc && helicopter.tailBroken)
+        heliEngineOsc.frequency.value=26+Math.sin(frame*0.2)*4;
+      helicopter.update();
+      if (!helicopter.alive) helicopter=null;
+    }
+
+    // Police radio crackle
+    if(policeRadioActive && Math.random()<0.008) playPoliceRadio();
+
+    // ── Score multiplier countdown ────────────────────────
+    if (multiplierTimer>0) {
+      multiplierTimer--;
+      if (multiplierTimer===0) scoreMultiplier=1;
+    }
+    if (goldFlash>0) goldFlash-=0.025;
+
+    // ── Grow flock when meter fills ───────────────────────
+    if(growthMeter>=CHAOS_PER_GULL){
+      growthMeter-=CHAOS_PER_GULL;
+      // Always spawn from ocean (top) — keeps attention on beach, avoids road chaos
+      const nx=rnd(0,W), ny=-15;
+      const g=new Gull(nx,ny);
+      g.airborne=true; g.settleTimer=180;
+      const dx=W/2-nx, dy=H_BASE/2-ny, dd=Math.hypot(dx,dy)+0.001;
+      g.vx=(dx/dd)*g.maxSpd; g.vy=(dy/dd)*g.maxSpd;
+      gulls.push(g);
+      newGullFlash=85;
+      playSquawk();
+    }
+
+    for(const c of chips) c.draw();
+    for(const d of dogs)  d.draw();
+    for(const ca of cars)  ca.draw();
+    for(const pu of pickups) pu.draw();
+    for(const po of police) po.draw();
+    for(const f of foodDrops) f.draw();
+    for(const cy of cyclists) cy.draw();
+    for(const di of diners)   di.draw();
+    for(const bo of boats)    bo.draw();
+    for(const sh of sharks)   sh.draw();
+    if(helicopter) helicopter.draw();
+    if(particles.length>600) particles.splice(0, particles.length-600);
+    for(let i=particles.length-1;i>=0;i--){
+      if(!particles[i].update()) particles.splice(i,1);
+      else particles[i].draw();
+    }
+    for(const n of npcs)  n.draw();
+    for(const g of gulls) g.draw();
+    // Golden aura vignette during multiplier — subtle border glow
+    if(scoreMultiplier>1){
+      const aura=ctx.createRadialGradient(W/2,H/2,Math.min(W,H)*0.25,W/2,H/2,Math.max(W,H)*0.85);
+      aura.addColorStop(0,'rgba(255,215,0,0)');
+      aura.addColorStop(1,'rgba(255,215,0,0.28)');
+      ctx.fillStyle=aura; ctx.fillRect(0,0,W,H);
+    }
+    // Brief gold flash on activation (fades fast)
+    if(goldFlash>0){
+      ctx.save(); ctx.globalAlpha=goldFlash*0.35;
+      ctx.fillStyle='#ffd700'; ctx.fillRect(0,0,W,H);
+      ctx.restore();
+    }
+    drawHUD();
+    drawAchNotif();
+
+  }else if(state==='gameover'){
+    drawBackground();
+    for(const c of chips) c.draw();
+    for(const d of dogs)  d.draw();
+    for(const ca of cars)  ca.draw();
+    for(const pu of pickups) pu.draw();
+    for(const po of police) po.draw();
+    for(const f of foodDrops) f.draw();
+    for(const cy of cyclists) cy.draw();
+    for(const di of diners)   di.draw();
+    for(const bo of boats)    bo.draw();
+    for(const sh of sharks)   sh.draw();
+    if(helicopter) helicopter.draw();
+    for(const n of npcs)  n.draw();
+    for(const g of gulls) g.draw();
+    drawGameOver();
+  }
+
+  requestAnimationFrame(loop);
+}
+
+loop();
+</script>
+</body>
+</html>
